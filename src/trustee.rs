@@ -2,20 +2,23 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Formatter, Display};
 
-use cryptid::{CryptoError, zkp, Scalar};
+use cryptid::{CryptoError, Scalar};
 use cryptid::elgamal::{CryptoContext, CurveElem};
-use cryptid::threshold::ThresholdGenerator;
+use cryptid::threshold::{ThresholdGenerator, Threshold};
 use eyre::Result;
 use reqwest::Client;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Serialize, Deserialize};
-use tokio::time;
+use tokio::{task, time};
 use tokio::time::Duration;
 use uuid::Uuid;
 
 use crate::sign;
 use crate::sign::{SigningPubKey, SignedMessage};
 use crate::wbb::{Response, WrappedResponse};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::stream::StreamExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn address(session_id: &Uuid, path: &str) -> String {
     format!("http://localhost:8000/api/{}{}", session_id, path)
@@ -54,18 +57,6 @@ pub enum TrusteeMessage {
     KeygenShare {
         share: Scalar,
     },
-    DecryptShare {
-        a_i: CurveElem,
-        proof: zkp::PrfEqDlogs,
-    },
-    PetCommit {
-        // commitment: Commitment
-    },
-    PetShare {
-        d_i: CurveElem,
-        e_i: CurveElem,
-        proof: zkp::PrfEqDlogs,
-    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -73,6 +64,7 @@ pub struct TrusteeInfo {
     pub id: Uuid,
     pub pubkey: SigningPubKey,
     pub index: usize,
+    pub address: String,
 }
 
 pub struct GeneratingTrustee {
@@ -92,11 +84,13 @@ impl GeneratingTrustee {
         let signing_keypair = sign::new_keypair(ctx.rng())?;
 
         // Create identification for this trustee
+        let port = 14000 + index;
         let mut trustee_info = HashMap::new();
         let my_info = TrusteeInfo {
             id,
             pubkey: signing_keypair.public_key().into(),
-            index
+            index,
+            address: format!("localhost:{}", port),
         };
         trustee_info.insert(id, my_info);
 
@@ -130,7 +124,7 @@ impl GeneratingTrustee {
     }
 
     pub fn gen_registration(&self) -> SignedMessage {
-        let msg = TrusteeMessage::Info { info: self.trustee_info.get(&self.id).unwrap().clone() };
+        let msg = TrusteeMessage::Info { info: self.trustee_info[&self.id].clone() };
         self.sign(msg)
     }
 
@@ -156,13 +150,61 @@ impl GeneratingTrustee {
         self.generator.received_commitments()
     }
 
-    pub fn gen_shares(&self) -> Result<HashMap<Uuid, Scalar>, TrusteeError> {
+    pub fn gen_shares(&mut self) -> Result<HashMap<Uuid, Scalar>, TrusteeError> {
         let mut result = HashMap::new();
         for (id, info) in self.trustee_info.iter() {
-            result.insert(id.clone(), self.generator.get_polynomial_share(info.index)?);
+            let share = self.generator.get_polynomial_share(info.index)?;
+            if self.id == *id {
+                self.generator.receive_share(info.index, &share)?;
+            } else {
+                result.insert(id.clone(), share);
+            }
         }
 
         Ok(result)
+    }
+
+    pub async fn receive_shares(&mut self) -> Result<()> {
+        let index = self.trustee_info[&self.id].index;
+        let addr = &self.trustee_info[&self.id].address;
+
+        // Accept connections
+        let mut listener = TcpListener::bind(addr).await?;
+
+        while let Some(stream) = listener.next().await {
+            if let Ok(mut stream) = stream {
+                // Read entire stream
+                let mut buffer = String::new();
+                stream.read_to_string(&mut buffer).await?;
+
+                // Decode message
+                if let Ok(msg) = serde_json::from_str::<SignedMessage>(&buffer) {
+                    // Check signature
+                    if let Some(info) = self.trustee_info.get(&msg.sender_id) {
+                        if msg.verify(&info.pubkey)? {
+                            if let TrusteeMessage::KeygenShare { share } = msg.inner {
+                                self.generator.receive_share(info.index, &share)?;
+                            } else {
+                                eprintln!("#{}: unexpected message type", index);
+                            }
+                        } else {
+                            eprintln!("#{}: failed verifying signature from #{}", index, info.index);
+                        }
+                    } else {
+                        eprintln!("#{}: unknown sender id: {}", index, msg.sender_id);
+                    }
+                } else {
+                    eprintln!("#{}: received malformed message", index);
+                }
+            }
+
+            // Check if we received all shares
+            if self.generator.is_complete() {
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     // Sign the given message
@@ -206,10 +248,29 @@ pub async fn run(session_id: Uuid,
 
     // 3. Shares
     // TODO: Trustees need to communicate directly with each other here.
-    let _shares = trustee.gen_shares()?;
+    let shares = trustee.gen_shares()?;
 
-    println!("Trustee {} done", index);
+    // Create sender threads
+    for (id, share) in shares {
+        let address = trustee.trustee_info[&id].address.clone();
+        let msg = trustee.sign(TrusteeMessage::KeygenShare { share });
+        task::spawn(send_share(address, msg));
+    }
+    trustee.receive_shares().await?;
+    let party = trustee.generator.finish()?;
+
+    println!("Trustee {} done: {}", index, party.pubkey().as_base64());
     Ok(())
+}
+
+async fn send_share(address: String, msg: SignedMessage) -> Result<()> {
+    loop {
+        // Wait a moment for the socket to open
+        time::delay_for(Duration::from_millis(200)).await;
+        if let Ok(mut stream) = TcpStream::connect(&address).await {
+            stream.write_all(serde_json::to_string(&msg)?.as_ref()).await?;
+        }
+    }
 }
 
 async fn get_registrations(client: &Client, trustee: &mut GeneratingTrustee) -> Result<()> {

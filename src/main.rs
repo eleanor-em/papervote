@@ -11,8 +11,8 @@ async fn main() {
     let session_id = Uuid::new_v4();
     let ctx = CryptoContext::new();
 
-    let min_trustees = 3;
-    let num_trustees = 5;
+    let min_trustees = 7;
+    let num_trustees = 10;
 
     let api = Api::new(num_trustees, &ctx).unwrap();
     thread::spawn(move || api.start());
