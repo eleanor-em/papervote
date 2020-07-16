@@ -1,23 +1,25 @@
-use serde::{Serialize, Deserialize};
-use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::collections::HashMap;
-use uuid::Uuid;
-use crate::sign::{SignedMessage, SigningPubKey};
+use std::sync::{RwLock, Arc};
+
 use cryptid::elgamal::CryptoContext;
-use crate::sign;
 use cryptid::CryptoError;
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use rocket::State;
 use rocket_contrib::json::Json;
+use serde::{Serialize, Deserialize};
+use uuid::Uuid;
+
+use crate::sign;
+use crate::sign::{SignedMessage, SigningPubKey};
 use crate::trustee::{TrusteeMessage, TrusteeInfo};
-use std::sync::{Mutex, Arc};
 
 pub struct Api {
     id: Uuid,
     keypair: Ed25519KeyPair,
     num_trustees: usize,
-    trustee_info: Arc<Mutex<HashMap<Uuid, TrusteeInfo>>>,
-    signed_trustee_info: Arc<Mutex<HashMap<Uuid, SignedMessage>>>,
-    commitments: Arc<Mutex<HashMap<Uuid, SignedMessage>>>,
+    trustee_info: Arc<RwLock<HashMap<Uuid, TrusteeInfo>>>,
+    signed_trustee_info: Arc<RwLock<HashMap<Uuid, SignedMessage>>>,
+    commitments: Arc<RwLock<HashMap<Uuid, SignedMessage>>>,
 }
 
 impl Api {
@@ -25,9 +27,9 @@ impl Api {
         let id = Uuid::new_v4();
         let keypair = sign::new_keypair(ctx.rng())?;
 
-        let trustee_info = Arc::new(Mutex::new(HashMap::new()));
-        let signed_trustee_info = Arc::new(Mutex::new(HashMap::new()));
-        let commitments = Arc::new(Mutex::new(HashMap::new()));
+        let trustee_info = Arc::new(RwLock::new(HashMap::new()));
+        let signed_trustee_info = Arc::new(RwLock::new(HashMap::new()));
+        let commitments = Arc::new(RwLock::new(HashMap::new()));
 
         Ok(Self {
             id,
@@ -93,8 +95,7 @@ fn get_pubkey(state: State<'_, Api>, _session: String) -> Json<WrappedResponse> 
 fn register_trustee(state: State<'_, Api>, _session: String, msg: Json<SignedMessage>) -> Json<WrappedResponse> {
     if let TrusteeMessage::Info { info } = &msg.inner {
         // Check we haven't filled up on trustees
-        let mut trustee_info = state.trustee_info.lock().unwrap();
-        if trustee_info.len() == state.num_trustees {
+        if state.trustee_info.read().unwrap().len() == state.num_trustees {
             return Json(WrappedResponse {
                 status: false,
                 msg: Response::InvalidRequest,
@@ -105,9 +106,8 @@ fn register_trustee(state: State<'_, Api>, _session: String, msg: Json<SignedMes
         match msg.verify(&info.pubkey) {
             Ok(true) => {
                 // Add the data
-                trustee_info.insert(info.id, info.clone());
-                let mut signed_trustee_info = state.signed_trustee_info.lock().unwrap();
-                signed_trustee_info.insert(info.id, msg.clone());
+                state.trustee_info.write().unwrap().insert(info.id, info.clone());
+                state.signed_trustee_info.write().unwrap().insert(info.id, msg.clone());
 
                 // Sign the message to confirm receipt
                 let signed_response = state.sign(msg.inner.clone());
@@ -142,7 +142,7 @@ fn register_trustee(state: State<'_, Api>, _session: String, msg: Json<SignedMes
 
 #[rocket::get("/api/<_session>/trustee/all")]
 fn get_trustees(state: State<'_, Api>, _session: String) -> Json<WrappedResponse> {
-    let signed_trustee_info = state.signed_trustee_info.lock().unwrap();
+    let signed_trustee_info = state.signed_trustee_info.read().unwrap();
     if signed_trustee_info.len() < state.num_trustees {
         Json(WrappedResponse {
             status: false,
@@ -159,13 +159,12 @@ fn get_trustees(state: State<'_, Api>, _session: String) -> Json<WrappedResponse
 #[rocket::post("/api/<_session>/keygen/commitment", format = "json", data = "<msg>")]
 fn post_commitment(state: State<'_, Api>, _session: String, msg: Json<SignedMessage>) -> Json<WrappedResponse> {
     if let TrusteeMessage::KeygenCommit { .. } = &msg.inner {
-        if let Some(info) = state.trustee_info.lock().unwrap().get(&msg.sender_id) {
+        if let Some(info) = state.trustee_info.read().unwrap().get(&msg.sender_id) {
             // Check signature
             match msg.verify(&info.pubkey) {
                 Ok(true) => {
                     // Add commitment
-                    let mut commitments = state.commitments.lock().unwrap();
-                    commitments.insert(info.id, msg.clone());
+                    state.commitments.write().unwrap().insert(info.id, msg.clone());
                     let signed_response = state.sign(msg.inner.clone());
                     Json(WrappedResponse {
                         status: true,
@@ -204,7 +203,7 @@ fn post_commitment(state: State<'_, Api>, _session: String, msg: Json<SignedMess
 
 #[rocket::get("/api/<_session>/keygen/commitment")]
 fn get_commitments(state: State<'_, Api>, _session: String) -> Json<WrappedResponse> {
-    let commitments = state.commitments.lock().unwrap();
+    let commitments = state.commitments.read().unwrap();
     if commitments.len() < state.num_trustees {
         Json(WrappedResponse {
             status: false,
