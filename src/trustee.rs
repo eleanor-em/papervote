@@ -4,7 +4,7 @@ use std::fmt::{Formatter, Display};
 
 use cryptid::{CryptoError, Scalar};
 use cryptid::elgamal::{CryptoContext, CurveElem};
-use cryptid::threshold::{ThresholdGenerator, Threshold};
+use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty};
 use eyre::Result;
 use reqwest::Client;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -218,13 +218,81 @@ impl GeneratingTrustee {
             sender_id: self.id,
         }
     }
+
+    async fn send_share(address: String, msg: SignedMessage) -> Result<()> {
+        loop {
+            // Wait a moment for the socket to open
+            time::delay_for(Duration::from_millis(200)).await;
+            if let Ok(mut stream) = TcpStream::connect(&address).await {
+                stream.write_all(serde_json::to_string(&msg)?.as_ref()).await?;
+            }
+        }
+    }
+
+    async fn get_registrations(&mut self, client: &Client) -> Result<()> {
+        loop {
+            // Wait a moment for other registrations
+            time::delay_for(Duration::from_millis(200)).await;
+            let res: WrappedResponse = client.get(&address(&self.session_id, "/trustee/all"))
+                .send().await?
+                .json().await?;
+
+            // Check signatures
+            if let Response::ResultSet(results) = res.msg {
+                for result in results {
+                    if let TrusteeMessage::Info { info } = &result.inner {
+                        if result.verify(&info.pubkey)? {
+                            self.add_info(info.clone());
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn get_commitments(&mut self, client: &Client) -> Result<()> {
+        loop {
+            // Wait a moment for other registrations
+            time::delay_for(Duration::from_millis(200)).await;
+            let res: WrappedResponse = client.get(&address(&self.session_id, "/keygen/commitment"))
+                .send().await?
+                .json().await?;
+
+            // Check signatures
+            if let Response::ResultSet(results) = res.msg {
+                if self.verify_all(&results)? {
+                    for result in results {
+                        if let TrusteeMessage::KeygenCommit { commitment } = result.inner {
+                            self.add_commitment(&result.sender_id, &commitment)?;
+                        } else {
+                            return Err(TrusteeError::InvalidResponse)?;
+                        }
+                    }
+                    return Ok(());
+                } else {
+                    return Err(TrusteeError::InvalidSignature)?;
+                }
+            }
+        }
+    }
 }
 
-pub async fn run(session_id: Uuid,
-                 ctx: CryptoContext,
-                 index: usize,
-                 min_trustees: usize,
-                 num_trustees: usize) -> Result<()> {
+pub struct Trustee {
+    session_id: Uuid,
+    id: Uuid,
+    signing_keypair: Ed25519KeyPair,
+    trustee_info: HashMap<Uuid, TrusteeInfo>,
+    party: ThresholdParty,
+}
+
+pub async fn generate(session_id: Uuid,
+                      ctx: CryptoContext,
+                      index: usize,
+                      min_trustees: usize,
+                      num_trustees: usize) -> Result<Trustee> {
     let mut trustee = GeneratingTrustee::new(session_id.clone(), &ctx, index, min_trustees, num_trustees)?;
     let client = reqwest::Client::new();
 
@@ -234,7 +302,7 @@ pub async fn run(session_id: Uuid,
         .json(&msg).send().await?
         .json().await?;
     // TODO: Check receipt signature, store in database
-    get_registrations(&client, &mut trustee).await?;
+    trustee.get_registrations(&client).await?;
     assert!(trustee.received_info());
 
     // 2. Commitment
@@ -243,7 +311,7 @@ pub async fn run(session_id: Uuid,
         .json(&msg).send().await?
         .json().await?;
     // TODO: Check receipt signature, store in database
-    get_commitments(&client, &mut trustee).await?;
+    trustee.get_commitments(&client).await?;
     assert!(trustee.received_commitments());
 
     // 3. Shares
@@ -254,71 +322,17 @@ pub async fn run(session_id: Uuid,
     for (id, share) in shares {
         let address = trustee.trustee_info[&id].address.clone();
         let msg = trustee.sign(TrusteeMessage::KeygenShare { share });
-        task::spawn(send_share(address, msg));
+        task::spawn(GeneratingTrustee::send_share(address, msg));
     }
     trustee.receive_shares().await?;
     let party = trustee.generator.finish()?;
 
     println!("Trustee {} done: {}", index, party.pubkey().as_base64());
-    Ok(())
-}
-
-async fn send_share(address: String, msg: SignedMessage) -> Result<()> {
-    loop {
-        // Wait a moment for the socket to open
-        time::delay_for(Duration::from_millis(200)).await;
-        if let Ok(mut stream) = TcpStream::connect(&address).await {
-            stream.write_all(serde_json::to_string(&msg)?.as_ref()).await?;
-        }
-    }
-}
-
-async fn get_registrations(client: &Client, trustee: &mut GeneratingTrustee) -> Result<()> {
-    loop {
-        // Wait a moment for other registrations
-        time::delay_for(Duration::from_millis(200)).await;
-        let res: WrappedResponse = client.get(&address(trustee.session_id(), "/trustee/all"))
-            .send().await?
-            .json().await?;
-
-        // Check signatures
-        if let Response::ResultSet(results) = res.msg {
-            for result in results {
-                if let TrusteeMessage::Info { info } = &result.inner {
-                    if result.verify(&info.pubkey)? {
-                        trustee.add_info(info.clone());
-                    }
-                }
-            }
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-async fn get_commitments(client: &Client, trustee: &mut GeneratingTrustee) -> Result<()> {
-    loop {
-        // Wait a moment for other registrations
-        time::delay_for(Duration::from_millis(200)).await;
-        let res: WrappedResponse = client.get(&address(trustee.session_id(), "/keygen/commitment"))
-            .send().await?
-            .json().await?;
-
-        // Check signatures
-        if let Response::ResultSet(results) = res.msg {
-            if trustee.verify_all(&results)? {
-                for result in results {
-                    if let TrusteeMessage::KeygenCommit { commitment } = result.inner {
-                        trustee.add_commitment(&result.sender_id, &commitment)?;
-                    } else {
-                        return Err(TrusteeError::InvalidResponse)?;
-                    }
-                }
-                return Ok(());
-            } else {
-                return Err(TrusteeError::InvalidSignature)?;
-            }
-        }
-    }
+    Ok(Trustee {
+        session_id,
+        id: trustee.id,
+        signing_keypair: trustee.signing_keypair,
+        trustee_info: trustee.trustee_info,
+        party,
+    })
 }

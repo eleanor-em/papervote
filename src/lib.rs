@@ -1,4 +1,4 @@
-#![feature(decl_macro, async_closure)]
+#![feature(decl_macro)]
 pub mod wbb;
 pub mod sign;
 pub mod trustee;
