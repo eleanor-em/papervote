@@ -1,0 +1,20 @@
+[package]
+name = "papervote"
+version = "0.1.0"
+authors = ["Eleanor McMurtry <elmcmurtry1@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cryptid = { git = "https://github.com/eleanor-em/cryptid" }
+ring = "0"
+uuid = { version = "0", features = ["serde", "v4"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0"
+rocket = "0"
+rocket_contrib = { version = "0", default-features = false, features = ["json"] }
+reqwest = { version = "0", features = ["json"] }
+tokio = { version = "0.2", features = ["full"] }
+eyre = "0"
