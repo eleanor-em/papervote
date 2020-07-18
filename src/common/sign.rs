@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex};
 use ring::rand::SystemRandom;
 use std::ops::Deref;
 use crate::trustee::TrusteeMessage;
+use std::convert::TryFrom;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SignedMessage {
     pub inner: TrusteeMessage,
     pub signature: Vec<u8>,
@@ -43,6 +44,22 @@ pub fn new_keypair(rng: Arc<Mutex<SystemRandom>>) -> Result<Ed25519KeyPair, Cryp
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 pub struct SigningPubKey {
     pub bytes: Vec<u8>,
+}
+
+impl Into<String> for SigningPubKey {
+    fn into(self) -> String {
+        base64::encode(self.bytes)
+    }
+}
+
+impl TryFrom<String> for SigningPubKey {
+    type Error = base64::DecodeError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Ok(Self {
+            bytes: base64::decode(value)?
+        })
+    }
 }
 
 impl From<&<Ed25519KeyPair as KeyPair>::PublicKey> for SigningPubKey {

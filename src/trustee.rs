@@ -2,26 +2,29 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Formatter, Display};
 
-use cryptid::{CryptoError, Scalar};
-use cryptid::elgamal::{CryptoContext, CurveElem};
-use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty};
+use cryptid::{CryptoError, Scalar, Hasher};
+use cryptid::elgamal::{CryptoContext, PublicKey};
+use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty, Commitment};
 use eyre::Result;
 use reqwest::Client;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Serialize, Deserialize};
-use tokio::{task, time};
+use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
-use crate::sign;
-use crate::sign::{SigningPubKey, SignedMessage};
-use crate::wbb::{Response, WrappedResponse};
+use crate::common::sign;
+use crate::common::sign::{SigningPubKey, SignedMessage};
+use crate::wbb::api::{Response, WrappedResponse};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use crate::APP_NAME;
+use crate::common::config::PapervoteConfig;
 
-fn address(session_id: &Uuid, path: &str) -> String {
-    format!("http://localhost:8000/api/{}{}", session_id, path)
+pub fn address(session_id: &Uuid, path: &str) -> String {
+    let cfg: PapervoteConfig = confy::load(APP_NAME).unwrap();
+    format!("{}{}{}", cfg.api_url, session_id, path)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -30,6 +33,9 @@ pub enum TrusteeError {
     Crypto(CryptoError),
     InvalidSignature,
     InvalidResponse,
+    MissingRegistration,
+    MissingCommitment,
+    MissingSignature,
 }
 
 impl Display for TrusteeError {
@@ -46,25 +52,41 @@ impl From<CryptoError> for TrusteeError {
 
 impl Error for TrusteeError {}
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TrusteeMessage {
     Info {
         info: TrusteeInfo,
     },
     KeygenCommit {
-        commitment: Vec<CurveElem>
+        commitment: Commitment,
     },
     KeygenShare {
         share: Scalar,
     },
+    KeygenSign {
+        pubkey: PublicKey,
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TrusteeInfo {
     pub id: Uuid,
     pub pubkey: SigningPubKey,
     pub index: usize,
     pub address: String,
+}
+
+impl TrusteeInfo {
+    pub fn into_signed_msg(self, signature: String) -> Result<SignedMessage, base64::DecodeError> {
+        let sender_id = self.id.clone();
+        let signature = base64::decode(signature)?;
+
+        Ok(SignedMessage {
+            inner: TrusteeMessage::Info { info: self },
+            signature,
+            sender_id,
+        })
+    }
 }
 
 pub struct GeneratingTrustee {
@@ -73,6 +95,7 @@ pub struct GeneratingTrustee {
     signing_keypair: Ed25519KeyPair,
     trustee_info: HashMap<Uuid, TrusteeInfo>,
     generator: ThresholdGenerator,
+    log: Vec<SignedMessage>,
 }
 
 impl GeneratingTrustee {
@@ -102,6 +125,7 @@ impl GeneratingTrustee {
             signing_keypair,
             trustee_info,
             generator,
+            log: Vec::new(),
         })
     }
 
@@ -142,7 +166,7 @@ impl GeneratingTrustee {
         self.sign(msg)
     }
 
-    pub fn add_commitment(&mut self, id: &Uuid, commitment: &Vec<CurveElem>) -> Result<(), TrusteeError> {
+    pub fn add_commitment(&mut self, id: &Uuid, commitment: &Commitment) -> Result<(), TrusteeError> {
         Ok(self.generator.receive_commitment(self.trustee_info[id].index, commitment)?)
     }
 
@@ -229,7 +253,7 @@ impl GeneratingTrustee {
         }
     }
 
-    async fn get_registrations(&mut self, client: &Client) -> Result<()> {
+    async fn get_registrations(&mut self, my_registration: &SignedMessage, client: &Client) -> Result<()> {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
@@ -239,33 +263,47 @@ impl GeneratingTrustee {
 
             // Check signatures
             if let Response::ResultSet(results) = res.msg {
+                // Make sure our message is in there
+                if !results.contains(my_registration) {
+                    return Err(TrusteeError::MissingCommitment)?;
+                }
+
                 for result in results {
                     if let TrusteeMessage::Info { info } = &result.inner {
+                        self.log.push(result.clone());
                         if result.verify(&info.pubkey)? {
                             self.add_info(info.clone());
                         }
                     }
                 }
                 break;
+            } else {
+                eprintln!("unexpected response: {:?}", res.msg);
             }
         }
 
         Ok(())
     }
 
-    async fn get_commitments(&mut self, client: &Client) -> Result<()> {
+    async fn get_commitments(&mut self, my_commit: &SignedMessage, client: &Client) -> Result<()> {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&address(&self.session_id, "/keygen/commitment"))
+            let res: WrappedResponse = client.get(&address(&self.session_id, "/keygen/commitment/all"))
                 .send().await?
                 .json().await?;
 
             // Check signatures
             if let Response::ResultSet(results) = res.msg {
                 if self.verify_all(&results)? {
+                    // Make sure our message is in there
+                    if !results.contains(my_commit) {
+                        return Err(TrusteeError::MissingCommitment)?;
+                    }
+
                     for result in results {
-                        if let TrusteeMessage::KeygenCommit { commitment } = result.inner {
+                        if let TrusteeMessage::KeygenCommit { commitment } = &result.inner {
+                            self.log.push(result.clone());
                             self.add_commitment(&result.sender_id, &commitment)?;
                         } else {
                             return Err(TrusteeError::InvalidResponse)?;
@@ -275,6 +313,41 @@ impl GeneratingTrustee {
                 } else {
                     return Err(TrusteeError::InvalidSignature)?;
                 }
+            } else {
+                eprintln!("unexpected response: {:?}", res.msg);
+            }
+        }
+    }
+
+    async fn get_signatures(&mut self, my_sig: &SignedMessage, client: &Client) -> Result<()> {
+        loop {
+            // Wait a moment for other registrations
+            time::delay_for(Duration::from_millis(200)).await;
+            let res: WrappedResponse = client.get(&address(&self.session_id, "/keygen/sign/all"))
+                .send().await?
+                .json().await?;
+
+            // Check signatures
+            if let Response::ResultSet(results) = res.msg {
+                if self.verify_all(&results)? {
+                    // Make sure our message is in there
+                    if !results.contains(my_sig) {
+                        return Err(TrusteeError::MissingSignature)?;
+                    }
+
+                    for result in results {
+                        if let TrusteeMessage::KeygenSign { .. } = &result.inner {
+                            self.log.push(result.clone());
+                        } else {
+                            return Err(TrusteeError::InvalidResponse)?;
+                        }
+                    }
+                    return Ok(());
+                } else {
+                    return Err(TrusteeError::InvalidSignature)?;
+                }
+            } else {
+                eprintln!("unexpected response: {:?}", res.msg);
             }
         }
     }
@@ -286,53 +359,81 @@ pub struct Trustee {
     signing_keypair: Ed25519KeyPair,
     trustee_info: HashMap<Uuid, TrusteeInfo>,
     party: ThresholdParty,
+    log: Vec<SignedMessage>,
 }
 
-pub async fn generate(session_id: Uuid,
-                      ctx: CryptoContext,
-                      index: usize,
-                      min_trustees: usize,
-                      num_trustees: usize) -> Result<Trustee> {
-    let mut trustee = GeneratingTrustee::new(session_id.clone(), &ctx, index, min_trustees, num_trustees)?;
-    let client = reqwest::Client::new();
+impl Trustee {
+    pub async fn new(session_id: Uuid,
+                          ctx: CryptoContext,
+                          index: usize,
+                          min_trustees: usize,
+                          trustee_count: usize) -> Result<Trustee> {
+        let mut trustee = GeneratingTrustee::new(session_id.clone(), &ctx, index, min_trustees, trustee_count)?;
+        let client = reqwest::Client::new();
 
-    // 1. Registration
-    let msg = trustee.gen_registration();
-    let _receipt: WrappedResponse = client.post(&address(trustee.session_id(), "/trustee/register"))
-        .json(&msg).send().await?
-        .json().await?;
-    // TODO: Check receipt signature, store in database
-    trustee.get_registrations(&client).await?;
-    assert!(trustee.received_info());
+        // 1. Registration
+        let msg = trustee.gen_registration();
+        let response: WrappedResponse = client.post(&address(trustee.session_id(), "/trustee/register"))
+            .json(&msg).send().await?
+            .json().await?;
+        if !response.status {
+            eprintln!("error registering: {:?}", response.msg);
+        }
+        trustee.get_registrations(&msg, &client).await?;
+        assert!(trustee.received_info());
 
-    // 2. Commitment
-    let msg = trustee.gen_commitment();
-    let _receipt: WrappedResponse = client.post(&address(trustee.session_id(), "/keygen/commitment"))
-        .json(&msg).send().await?
-        .json().await?;
-    // TODO: Check receipt signature, store in database
-    trustee.get_commitments(&client).await?;
-    assert!(trustee.received_commitments());
+        // 2. Commitment
+        let msg = trustee.gen_commitment();
+        let response: WrappedResponse = client.post(&address(trustee.session_id(), "/keygen/commitment"))
+            .json(&msg).send().await?
+            .json().await?;
+        if !response.status {
+            eprintln!("error committing: {:?}", response.msg);
+        }
+        trustee.get_commitments(&msg, &client).await?;
+        assert!(trustee.received_commitments());
 
-    // 3. Shares
-    // TODO: Trustees need to communicate directly with each other here.
-    let shares = trustee.gen_shares()?;
+        // 3. Shares
+        let shares = trustee.gen_shares()?;
 
-    // Create sender threads
-    for (id, share) in shares {
-        let address = trustee.trustee_info[&id].address.clone();
-        let msg = trustee.sign(TrusteeMessage::KeygenShare { share });
-        task::spawn(GeneratingTrustee::send_share(address, msg));
+        // Create sender threads
+        for (id, share) in shares {
+            let address = trustee.trustee_info[&id].address.clone();
+            let msg = trustee.sign(TrusteeMessage::KeygenShare { share });
+            tokio::spawn(GeneratingTrustee::send_share(address, msg));
+        }
+        trustee.receive_shares().await?;
+        let party = trustee.generator.finish()?;
+
+        // 4. Sign public key
+        let msg = trustee.sign(TrusteeMessage::KeygenSign { pubkey: party.pubkey() });
+        let response: WrappedResponse = client.post(&address(trustee.session_id(), "/keygen/sign"))
+            .json(&msg).send().await?
+            .json().await?;
+        if !response.status {
+            eprintln!("error signing: {:?}", response.msg);
+        }
+
+        // 5. Check signatures
+        trustee.get_signatures(&msg, &client).await?;
+
+        println!("Trustee {} done: {}", index, party.pubkey().as_base64());
+        // TODO: Store on disk.
+        Ok(Trustee {
+            session_id,
+            id: trustee.id,
+            signing_keypair: trustee.signing_keypair,
+            trustee_info: trustee.trustee_info,
+            party,
+            log: trustee.log,
+        })
     }
-    trustee.receive_shares().await?;
-    let party = trustee.generator.finish()?;
 
-    println!("Trustee {} done: {}", index, party.pubkey().as_base64());
-    Ok(Trustee {
-        session_id,
-        id: trustee.id,
-        signing_keypair: trustee.signing_keypair,
-        trustee_info: trustee.trustee_info,
-        party,
-    })
+    pub fn hash_log(&self) -> String {
+        let mut hasher = Hasher::sha_256();
+        for msg in self.log.iter() {
+            hasher = hasher.update(serde_json::to_string(msg).unwrap().as_bytes());
+        }
+        base64::encode(&hasher.finish_vec())
+    }
 }
