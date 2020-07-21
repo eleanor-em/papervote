@@ -6,10 +6,12 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use uuid::Uuid;
 use crate::common::sign::{SignedMessage, SigningPubKey};
-use std::convert::{TryInto, TryFrom};
+use std::convert::TryInto;
 use crate::trustee::{TrusteeInfo, TrusteeMessage};
-use cryptid::elgamal::PublicKey;
-use cryptid::threshold::Commitment;
+use cryptid::elgamal::{PublicKey, Ciphertext};
+use cryptid::threshold::KeygenCommitment;
+use crate::common::commit::Commitment;
+use cryptid::AsBase64;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -72,7 +74,7 @@ impl DbClient {
                 pubkey          TEXT NOT NULL UNIQUE,
                 index           SMALLINT NOT NULL,
                 address         TEXT NOT NULL,
-                sig             TEXT NOT NULL UNIQUE,
+                signature       TEXT NOT NULL UNIQUE,
                 CONSTRAINT      unique_trustee UNIQUE(session, uuid),
                 CONSTRAINT      unique_index UNIQUE(session, index),
                 CONSTRAINT      unique_address UNIQUE(session, address)
@@ -100,8 +102,24 @@ impl DbClient {
                 session         UUID NOT NULL,
                 trustee         UUID NOT NULL,
                 commitment      TEXT NOT NULL UNIQUE,
-                sig             TEXT NOT NULL UNIQUE,
+                signature       TEXT NOT NULL UNIQUE,
                 CONSTRAINT      unique_trustee_keygen_commit UNIQUE(session, trustee)
+            );
+            CREATE TABLE IF NOT EXISTS wbb_idents (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                voter_id        TEXT NOT NULL,
+                c_a             TEXT NOT NULL UNIQUE,
+                c_b             TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS wbb_commits (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                voter_id        TEXT NOT NULL,
+                enc_mac         TEXT NOT NULL,
+                enc_vote        TEXT NOT NULL,
+                signed_by       UUID NOT NULL,
+                signature       TEXT NOT NULL
             );
         ").await?;
 
@@ -122,7 +140,7 @@ impl DbClient {
 
     pub async fn insert_trustee(&self, session: &Uuid, uuid: &Uuid, pubkey: &SigningPubKey, index: usize, address: &str, signature: &[u8]) -> Result<(), DbError> {
         let result = self.client.execute("
-            INSERT INTO trustees(session, uuid, pubkey, index, address, sig)
+            INSERT INTO trustees(session, uuid, pubkey, index, address, signature)
             VALUES($1, $2, $3, $4, $5, $6);
         ", &[
             &session,
@@ -140,9 +158,9 @@ impl DbClient {
         }
     }
     
-    pub async fn insert_commitment(&self, session: &Uuid, trustee: &Uuid, commitment: &Commitment, signature: &[u8]) -> Result<(), DbError> {
+    pub async fn insert_commitment(&self, session: &Uuid, trustee: &Uuid, commitment: &KeygenCommitment, signature: &[u8]) -> Result<(), DbError> {
         let result = self.client.execute("
-            INSERT INTO keygen_commitments(session, trustee, commitment, sig)
+            INSERT INTO keygen_commitments(session, trustee, commitment, signature)
             VALUES($1, $2, $3, $4);
         ", &[
             &session,
@@ -159,11 +177,12 @@ impl DbClient {
     }
 
     pub async fn insert_pubkey_sig(&self, session: &Uuid, trustee: &Uuid, pubkey: &PublicKey, signature: &[u8]) -> Result<(), DbError> {
+        // For conflicts, don't worry because we only care about the signatures
         self.client.execute("
             INSERT INTO parameters(session, pubkey)
             VALUES ($1, $2)
             ON CONFLICT DO NOTHING
-        ", &[&session, &pubkey.to_string()]).await?;
+        ", &[&session, &pubkey.as_base64()]).await?;
 
         let result = self.client.execute("
             INSERT INTO parameter_signatures(session, trustee, pubkey_sig)
@@ -173,6 +192,32 @@ impl DbClient {
             &trustee,
             &base64::encode(signature)
         ]).await?;
+
+        if result > 0 {
+            Ok(())
+        } else {
+            Err(DbError::InsertAlreadyExists)
+        }
+    }
+
+    pub async fn insert_ident(&self, session: &Uuid, voter_id: String, c_a: &Commitment, c_b: &Commitment) -> Result<(), DbError> {
+        let result = self.client.execute("
+            INSERT INTO wbb_idents(session, voter_id, c_a, c_b)
+            VALUES ($1, $2, $3, $4);
+        ", &[session, &voter_id, &c_a.as_base64(), &c_b.as_base64()]).await?;
+
+        if result > 0 {
+            Ok(())
+        } else {
+            Err(DbError::InsertAlreadyExists)
+        }
+    }
+
+    pub async fn insert_ec_commit(&self, session: &Uuid, voter_id: String, enc_mac: &Ciphertext, enc_vote: &Ciphertext, signed_by: &Uuid, signature: &[u8]) -> Result<(), DbError> {
+        let result = self.client.execute("
+            INSERT INTO wbb_commits(session, voter_id, enc_mac, enc_vote, signed_by, signature)
+            VALUES ($1, $2, $3, $4, $5, $6
+        ", &[session, &voter_id, &enc_mac.to_string(), &enc_vote.to_string(), signed_by, &base64::encode(signature)]).await?;
 
         if result > 0 {
             Ok(())
@@ -235,7 +280,7 @@ impl DbClient {
 
     pub async fn get_all_trustee_info(&self, session: &Uuid) -> Result<Vec<SignedMessage>, DbError> {
         let rows = self.client.query("
-            SELECT uuid, pubkey, index, address, sig
+            SELECT uuid, pubkey, index, address, signature
             FROM trustees
             WHERE session=$1;
         ", &[&session]).await?;
@@ -247,7 +292,7 @@ impl DbClient {
             let pubkey: SigningPubKey = pubkey.try_into().map_err(|_| DbError::SchemaFailure("pubkey"))?;
             let index: i16 = row.get("index");
             let address: String = row.get("address");
-            let signature: String = row.get("sig");
+            let signature: String = row.get("signature");
 
             let info = TrusteeInfo {
                 id,
@@ -263,7 +308,7 @@ impl DbClient {
 
     pub async fn get_all_commitments(&self, session: &Uuid) -> Result<Vec<SignedMessage>, DbError> {
         let rows = self.client.query("
-            SELECT trustee, commitment, sig
+            SELECT trustee, commitment, signature
             FROM keygen_commitments
             WHERE session=$1;
         ", &[&session]).await?;
@@ -273,8 +318,8 @@ impl DbClient {
             let sender_id: Uuid = row.get("trustee");
             let commitment: String = row.get("commitment");
             let commitment = commitment.try_into().map_err(|_| DbError::SchemaFailure("commitment"))?;
-            let signature: String = row.get("sig");
-            let signature: Vec<u8> = base64::decode(signature).map_err(|_| DbError::SchemaFailure("sig"))?;
+            let signature: String = row.get("signature");
+            let signature: Vec<u8> = base64::decode(signature).map_err(|_| DbError::SchemaFailure("signature"))?;
             let inner = TrusteeMessage::KeygenCommit { commitment };
 
             result.push(SignedMessage {
@@ -292,7 +337,7 @@ impl DbClient {
             SELECT pubkey FROM parameters WHERE session=$1;
         ", &[&session]).await.map_err(|_| DbError::NotEnoughRows)?;
         let pubkey: String = row.get("pubkey");
-        let pubkey: PublicKey = PublicKey::try_from(pubkey.as_str()).map_err(|_| DbError::SchemaFailure("pubkey"))?;
+        let pubkey: PublicKey = PublicKey::try_from_base64(pubkey.as_str()).map_err(|_| DbError::SchemaFailure("pubkey"))?;
 
         let rows = self.client.query("
             SELECT trustee, pubkey_sig
@@ -304,7 +349,7 @@ impl DbClient {
         for row in rows {
             let sender_id: Uuid = row.get("trustee");
             let signature: String = row.get("pubkey_sig");
-            let signature: Vec<u8> = base64::decode(signature).map_err(|_| DbError::SchemaFailure("sig"))?;
+            let signature: Vec<u8> = base64::decode(signature).map_err(|_| DbError::SchemaFailure("signature"))?;
             let inner = TrusteeMessage::KeygenSign { pubkey };
 
             result.push(SignedMessage {

@@ -5,10 +5,13 @@ use std::thread;
 use cryptid::elgamal::CryptoContext;
 use eyre::Result;
 use papervote::APP_NAME;
-use papervote::wbb::api::{Api, NewSessionRequest, WrappedResponse};
+use papervote::wbb::api::{Api, NewSessionRequest, WrappedResponse, address};
 use uuid::Uuid;
 use papervote::common::config::PapervoteConfig;
 use papervote::trustee::Trustee;
+use papervote::voter::Voter;
+use papervote::common::commit::PedersenCtx;
+use papervote::voter::vote::{Vote, Candidate};
 
 
 #[tokio::main]
@@ -39,17 +42,44 @@ async fn main() -> Result<()> {
     let mut futures = Vec::new();
     for index in 1..trustee_count + 1 {
         let session_id = session_id.clone();
-        let ctx = ctx.cloned();
+        let ctx = ctx.clone();
         futures.push(tokio::spawn(Trustee::new(session_id, ctx, index, min_trustees, trustee_count)));
     }
 
-    let trustees: Vec<_> = futures.into_iter()
-        .map(async move |future| future.await?)
-        .collect();
+    let mut trustees = Vec::new();
 
-    for trustee in trustees {
-        let trustee = trustee.await?;
-        println!("Hash: {}", trustee.hash_log());
+    for future in futures {
+        let trustee = future.await??;
+        println!("Hash: {}", trustee.log());
+        trustees.push(trustee);
+    }
+
+    let pubkey = trustees[0].pubkey();
+    let alice = Candidate::new("Alice", 0);
+    let bob = Candidate::new("Bob", 1);
+    let carol = Candidate::new("Carol", 2);
+
+    let commit_ctx = PedersenCtx::new(ctx.clone());
+
+    let mut voter = Voter::new(pubkey, ctx.clone(), commit_ctx, "0".to_string())?;
+    let mut vote = Vote::new();
+    vote.set(&alice, 2);
+    vote.set(&bob, 1);
+    vote.set(&carol, 0);
+
+    voter.set_vote(vote);
+
+    let init_commit = voter.get_init_commit();
+    let ec_commit = voter.get_ec_commit().unwrap();
+
+    println!("{}", serde_json::to_string(&init_commit)?);
+    println!("{}", serde_json::to_string(&ec_commit)?);
+
+    let response: WrappedResponse = client.post(&address(&session_id, "/cast/ident"))
+        .json(&init_commit).send().await?
+        .json().await?;
+    if !response.status {
+        eprintln!("error submitting ident: {:?}", response.msg);
     }
 
     Ok(())

@@ -11,6 +11,14 @@ use crate::wbb::db::{DbClient, DbError};
 use eyre::Report;
 use std::str::FromStr;
 use futures::{executor, TryFutureExt};
+use crate::voter::VoterMessage;
+use crate::common::config::PapervoteConfig;
+use crate::APP_NAME;
+
+pub fn address(session_id: &Uuid, path: &str) -> String {
+    let cfg: PapervoteConfig = confy::load(APP_NAME).unwrap();
+    format!("{}{}{}", cfg.api_url, session_id, path)
+}
 
 pub struct Api {
     db: Arc<DbClient>,
@@ -34,6 +42,7 @@ impl Api {
                 get_commitments,
                 sign_pubkey,
                 get_pubkey_sigs,
+                post_ident,
             ])
             .manage(self)
             .launch();
@@ -87,6 +96,8 @@ fn respond(res: EitherResponse) -> Json<WrappedResponse> {
         Err(res) => res
     }
 }
+
+// Setup queries
 
 #[rocket::post("/api/<session>/trustee/register", format = "json", data = "<msg>")]
 fn register_trustee(state: State<'_, Api>, session: String, msg: Json<SignedMessage>) -> Json<WrappedResponse> {
@@ -238,4 +249,50 @@ fn get_pubkey_sigs_inner(state: State<'_, Api>, session: String) -> EitherRespon
             failure(Response::MiscError)
         })?;
     Ok(success(Response::ResultSet(results)))
+}
+
+// The protocol itself
+
+#[rocket::post("/api/<session>/cast/ident", format = "json", data = "<msg>")]
+fn post_ident(state: State<'_, Api>, session: String, msg: Json<VoterMessage>) -> Json<WrappedResponse> {
+    respond(post_ident_inner(state, session, msg))
+}
+fn post_ident_inner(state: State<'_, Api>, session: String, msg: Json<VoterMessage>) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    let (voter_id, c_a, c_b) = match msg.into_inner() {
+        VoterMessage::InitialCommit { voter_id, c_a, c_b } => Ok((voter_id, c_a, c_b)),
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    executor::block_on(state.db.insert_ident(&session, voter_id, &c_a, &c_b))
+        .map(|_| success(Response::Ok))
+        .map_err(|_| failure(Response::TrusteeMissing))
+}
+
+#[rocket::post("/api/<session>/cast/commit", format = "json", data = "<msg>")]
+fn post_ec_commit(state: State<'_, Api>, session: String, msg: Json<SignedMessage>) -> Json<WrappedResponse> {
+    respond(post_ec_commit_inner(state, session, msg))
+}
+fn post_ec_commit_inner(state: State<'_, Api>, session: String, msg: Json<SignedMessage>) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    let (voter_id, enc_mac, enc_vote) = match &msg.inner {
+        TrusteeMessage::EcCommit { voter_id, enc_mac, enc_vote } => Ok((voter_id, enc_mac, enc_vote)),
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    // Verify the signature to ensure this was sent by an EC rep
+    let trustee = executor::block_on(state.db.get_one_trustee_info(&session, &msg.sender_id))
+        .map_err(|_| failure(Response::InvalidSignature))?;
+    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+        return Err(failure(Response::InvalidSignature));
+    }
+
+    executor::block_on(state.db.insert_ec_commit(&session, voter_id.clone(), enc_mac, enc_vote, &msg.sender_id, &msg.signature))
+        .map_err(|_| failure(Response::FailedInsertion))?;
+
+    Ok(success(Response::Ok))
 }

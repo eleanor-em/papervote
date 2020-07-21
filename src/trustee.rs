@@ -3,8 +3,9 @@ use std::error::Error;
 use std::fmt::{Formatter, Display};
 
 use cryptid::{CryptoError, Scalar, Hasher};
-use cryptid::elgamal::{CryptoContext, PublicKey};
-use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty, Commitment};
+use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext};
+use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty, KeygenCommitment};
+use cryptid::AsBase64;
 use eyre::Result;
 use reqwest::Client;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -15,17 +16,10 @@ use uuid::Uuid;
 
 use crate::common::sign;
 use crate::common::sign::{SigningPubKey, SignedMessage};
-use crate::wbb::api::{Response, WrappedResponse};
+use crate::wbb::api::{Response, WrappedResponse, address};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::APP_NAME;
-use crate::common::config::PapervoteConfig;
-
-pub fn address(session_id: &Uuid, path: &str) -> String {
-    let cfg: PapervoteConfig = confy::load(APP_NAME).unwrap();
-    format!("{}{}{}", cfg.api_url, session_id, path)
-}
 
 #[derive(Clone, Copy, Debug)]
 pub enum TrusteeError {
@@ -58,13 +52,18 @@ pub enum TrusteeMessage {
         info: TrusteeInfo,
     },
     KeygenCommit {
-        commitment: Commitment,
+        commitment: KeygenCommitment,
     },
     KeygenShare {
         share: Scalar,
     },
     KeygenSign {
         pubkey: PublicKey,
+    },
+    EcCommit {
+        voter_id: String,
+        enc_mac: Ciphertext,
+        enc_vote: Ciphertext,
     }
 }
 
@@ -95,12 +94,12 @@ pub struct GeneratingTrustee {
     signing_keypair: Ed25519KeyPair,
     trustee_info: HashMap<Uuid, TrusteeInfo>,
     generator: ThresholdGenerator,
-    log: Vec<SignedMessage>,
+    log: Hasher,
 }
 
 impl GeneratingTrustee {
     pub fn new(session_id: Uuid, ctx: &CryptoContext, index: usize, k: usize, n: usize) -> Result<GeneratingTrustee, CryptoError> {
-        let mut ctx = ctx.cloned();
+        let mut ctx = ctx.clone();
         let id = Uuid::new_v4();
 
         // Generate a signature keypair
@@ -125,7 +124,7 @@ impl GeneratingTrustee {
             signing_keypair,
             trustee_info,
             generator,
-            log: Vec::new(),
+            log: Hasher::sha_256(),
         })
     }
 
@@ -166,7 +165,7 @@ impl GeneratingTrustee {
         self.sign(msg)
     }
 
-    pub fn add_commitment(&mut self, id: &Uuid, commitment: &Commitment) -> Result<(), TrusteeError> {
+    pub fn add_commitment(&mut self, id: &Uuid, commitment: &KeygenCommitment) -> Result<(), TrusteeError> {
         Ok(self.generator.receive_commitment(self.trustee_info[id].index, commitment)?)
     }
 
@@ -270,7 +269,7 @@ impl GeneratingTrustee {
 
                 for result in results {
                     if let TrusteeMessage::Info { info } = &result.inner {
-                        self.log.push(result.clone());
+                        self.log.update(serde_json::to_string(&result.clone()).unwrap().as_bytes());
                         if result.verify(&info.pubkey)? {
                             self.add_info(info.clone());
                         }
@@ -303,7 +302,7 @@ impl GeneratingTrustee {
 
                     for result in results {
                         if let TrusteeMessage::KeygenCommit { commitment } = &result.inner {
-                            self.log.push(result.clone());
+                            self.log.update(serde_json::to_string(&result.clone()).unwrap().as_bytes());
                             self.add_commitment(&result.sender_id, &commitment)?;
                         } else {
                             return Err(TrusteeError::InvalidResponse)?;
@@ -337,7 +336,7 @@ impl GeneratingTrustee {
 
                     for result in results {
                         if let TrusteeMessage::KeygenSign { .. } = &result.inner {
-                            self.log.push(result.clone());
+                            self.log.update(serde_json::to_string(&result.clone()).unwrap().as_bytes());
                         } else {
                             return Err(TrusteeError::InvalidResponse)?;
                         }
@@ -359,7 +358,7 @@ pub struct Trustee {
     signing_keypair: Ed25519KeyPair,
     trustee_info: HashMap<Uuid, TrusteeInfo>,
     party: ThresholdParty,
-    log: Vec<SignedMessage>,
+    log: Hasher,
 }
 
 impl Trustee {
@@ -429,11 +428,14 @@ impl Trustee {
         })
     }
 
-    pub fn hash_log(&self) -> String {
-        let mut hasher = Hasher::sha_256();
-        for msg in self.log.iter() {
-            hasher = hasher.update(serde_json::to_string(msg).unwrap().as_bytes());
-        }
+    pub fn log(&self) -> String {
+        let hasher = self.log.clone();
         base64::encode(&hasher.finish_vec())
     }
+
+    pub fn pubkey(&self) -> PublicKey {
+        self.party.pubkey()
+    }
+
+    // TODO: Listen for voter data submissions
 }
