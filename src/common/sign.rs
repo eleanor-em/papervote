@@ -12,6 +12,8 @@ use std::ops::Deref;
 use crate::trustee::TrusteeMessage;
 use std::convert::TryFrom;
 
+pub type SigningKeypair = Ed25519KeyPair;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SignedMessage {
     pub inner: TrusteeMessage,

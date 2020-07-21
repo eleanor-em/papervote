@@ -8,18 +8,24 @@ use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty, KeygenCo
 use cryptid::AsBase64;
 use eyre::Result;
 use reqwest::Client;
-use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Serialize, Deserialize};
 use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
 use crate::common::sign;
-use crate::common::sign::{SigningPubKey, SignedMessage};
+use crate::common::sign::{SigningPubKey, SignedMessage, SigningKeypair};
 use crate::wbb::api::{Response, WrappedResponse, address};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use crate::voter::{VoterMessage, Ballot, VoterId};
+use cryptid::zkp::PrfKnowDlog;
+use std::sync::{Arc, Mutex};
+use ring::signature::KeyPair;
+use crate::voter::vote::{Vote, Candidate};
+use futures::future::AbortHandle;
+use crate::wbb::api;
 
 #[derive(Clone, Copy, Debug)]
 pub enum TrusteeError {
@@ -30,6 +36,7 @@ pub enum TrusteeError {
     MissingRegistration,
     MissingCommitment,
     MissingSignature,
+    InvalidState,
 }
 
 impl Display for TrusteeError {
@@ -61,9 +68,17 @@ pub enum TrusteeMessage {
         pubkey: PublicKey,
     },
     EcCommit {
-        voter_id: String,
+        voter_id: VoterId,
         enc_mac: Ciphertext,
         enc_vote: Ciphertext,
+    },
+    EcVote {
+        vote: String,
+        enc_id: Ciphertext,
+        enc_a: Ciphertext,
+        enc_b: Ciphertext,
+        enc_r_a: Ciphertext,
+        enc_r_b: Ciphertext,
     }
 }
 
@@ -91,7 +106,7 @@ impl TrusteeInfo {
 pub struct GeneratingTrustee {
     session_id: Uuid,
     id: Uuid,
-    signing_keypair: Ed25519KeyPair,
+    signing_keypair: SigningKeypair,
     trustee_info: HashMap<Uuid, TrusteeInfo>,
     generator: ThresholdGenerator,
     log: Hasher,
@@ -248,6 +263,7 @@ impl GeneratingTrustee {
             time::delay_for(Duration::from_millis(200)).await;
             if let Ok(mut stream) = TcpStream::connect(&address).await {
                 stream.write_all(serde_json::to_string(&msg)?.as_ref()).await?;
+                return Ok(());
             }
         }
     }
@@ -353,20 +369,32 @@ impl GeneratingTrustee {
 }
 
 pub struct Trustee {
-    session_id: Uuid,
-    id: Uuid,
-    signing_keypair: Ed25519KeyPair,
+    info: InternalInfo,
     trustee_info: HashMap<Uuid, TrusteeInfo>,
+    received_votes: Arc<Mutex<Vec<SignedMessage>>>,
     party: ThresholdParty,
+    abort_handle: Option<AbortHandle>,
     log: Hasher,
+}
+
+#[derive(Clone)]
+struct InternalInfo {
+    address: String,
+    index: usize,
+    id: Uuid,
+    session_id: Uuid,
+    client: Client,
+    signing_keypair: Arc<SigningKeypair>,
+    ctx: CryptoContext,
+    pubkey: PublicKey,
 }
 
 impl Trustee {
     pub async fn new(session_id: Uuid,
-                          ctx: CryptoContext,
-                          index: usize,
-                          min_trustees: usize,
-                          trustee_count: usize) -> Result<Trustee> {
+                      ctx: CryptoContext,
+                      index: usize,
+                      min_trustees: usize,
+                      trustee_count: usize) -> Result<Trustee> {
         let mut trustee = GeneratingTrustee::new(session_id.clone(), &ctx, index, min_trustees, trustee_count)?;
         let client = reqwest::Client::new();
 
@@ -417,13 +445,25 @@ impl Trustee {
         trustee.get_signatures(&msg, &client).await?;
 
         println!("Trustee {} done: {}", index, party.pubkey().as_base64());
+
+        let info = InternalInfo {
+            address: trustee.trustee_info[&trustee.id].address.clone(),
+            index,
+            id: trustee.id,
+            session_id,
+            client,
+            signing_keypair: Arc::new(trustee.signing_keypair),
+            ctx,
+            pubkey: party.pubkey(),
+        };
+
         // TODO: Store on disk.
         Ok(Trustee {
-            session_id,
-            id: trustee.id,
-            signing_keypair: trustee.signing_keypair,
+            info,
             trustee_info: trustee.trustee_info,
+            received_votes: Arc::new(Mutex::new(Vec::new())),
             party,
+            abort_handle: None,
             log: trustee.log,
         })
     }
@@ -437,5 +477,200 @@ impl Trustee {
         self.party.pubkey()
     }
 
-    // TODO: Listen for voter data submissions
+    pub fn address(&self) -> String {
+        self.info.address.clone()
+    }
+
+    pub async fn close_votes(&self, expected: usize) -> Result<()> {
+        let mut count = 0;
+        loop {
+            let current = self.received_votes.lock().unwrap().len() ;
+            if count >= 5 || current >= expected {
+                break;
+            }
+            println!("waiting for votes... ({}/{})", current, expected);
+            count += 1;
+            time::delay_for(Duration::from_millis(500)).await;
+        }
+
+        if let Some(handle) = &self.abort_handle {
+            // Abort tasks
+            handle.abort();
+
+            // Send votes
+            let votes = self.received_votes.lock().unwrap();
+            println!("Votes received: {}", votes.len());
+            for vote in votes.iter() {
+                let response: WrappedResponse = self.info.client.post(&api::address(&self.info.session_id, "/tally/vote"))
+                    .json(&vote).send().await?
+                    .json().await?;
+                if !response.status {
+                    eprintln!("Error response: {:?}", response.msg);
+                }
+            }
+
+            Ok(())
+        } else {
+            Err(TrusteeError::InvalidState)?
+        }
+    }
+
+    pub fn receive_voter_data(&mut self, candidates: Arc<HashMap<usize, Candidate>>)  {
+        let (future, handle) = futures::future::abortable(Self::receive_voter_data_task(self.info.clone(), self.received_votes.clone(), candidates));
+        self.abort_handle = Some(handle);
+        tokio::spawn(future);
+    }
+
+    async fn receive_voter_data_task(info: InternalInfo,
+                                     received_votes: Arc<Mutex<Vec<SignedMessage>>>,
+                                     candidates: Arc<HashMap<usize, Candidate>>) -> Result<()> {
+        let mut listener = TcpListener::bind(&info.address).await?;
+
+        while let Some(stream) = listener.next().await {
+            if let Ok(stream) = stream {
+                tokio::spawn(Self::receive_voter_data_inner(stream, info.clone(), received_votes.clone(), candidates.clone()));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn receive_voter_data_inner(mut stream: TcpStream,
+                                      info: InternalInfo,
+                                      received_votes: Arc<Mutex<Vec<SignedMessage>>>,
+                                      candidates: Arc<HashMap<usize, Candidate>>) -> Result<()> {
+        // Read entire stream
+        let mut buffer = String::new();
+        stream.read_to_string(&mut buffer).await?;
+
+        if let Ok(msg) = serde_json::from_str::<VoterMessage>(&buffer) {
+            match msg {
+                VoterMessage::EcCommit { voter_id, enc_mac, enc_vote, prf_know_mac, prf_know_vote } => {
+                    tokio::spawn(Self::handle_ec_commit(info.clone(), voter_id, enc_mac, enc_vote, prf_know_mac, prf_know_vote));
+                },
+                VoterMessage::Ballot(ballot) => {
+                    tokio::spawn(Self::handle_ballot(info.clone(), received_votes.clone(), candidates.clone(), ballot));
+                },
+                _ => {
+                    eprintln!("#{}: unrecognised message", info.index);
+                },
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_ec_commit(mut info: InternalInfo,
+                              voter_id: VoterId,
+                              enc_mac: Ciphertext,
+                              enc_vote: Ciphertext,
+                              prf_know_mac: PrfKnowDlog,
+                              prf_know_vote: PrfKnowDlog) -> Result<()> {
+        // Check the proofs
+        if !prf_know_mac.verify()? {
+            eprintln!("#{}: failed to verify MAC proof-of-knowledge", info.index);
+            return Ok(());
+        }
+        if !prf_know_vote.verify()? {
+            eprintln!("#{}: failed to verify vote proof-of-knowledge", info.index);
+            return Ok(());
+        }
+
+        // Re-randomise encryptions
+        let r = info.ctx.random_power()?;
+        let enc_mac = info.pubkey.rerand(&info.ctx, &enc_mac, &r);
+        let r = info.ctx.random_power()?;
+        let enc_vote = info.pubkey.rerand(&info.ctx, &enc_vote, &r);
+
+        // Construct message
+        let inner = TrusteeMessage::EcCommit { voter_id, enc_mac, enc_vote };
+        let data = serde_json::to_string(&inner)?.as_bytes().to_vec();
+        let signature = info.signing_keypair.sign(&data).as_ref().to_vec();
+
+        let msg = SignedMessage {
+            inner,
+            signature,
+            sender_id: info.id,
+        };
+
+        // Post to WBB
+        let response: WrappedResponse = info.client.post(&address(&info.session_id, "/cast/commit"))
+            .json(&msg).send().await?
+            .json().await?;
+
+        if !response.status {
+            eprintln!("error submitting ident: {:?}", response.msg);
+        }
+
+        Ok(())
+    }
+
+    async fn handle_ballot(mut info: InternalInfo,
+                           received_votes: Arc<Mutex<Vec<SignedMessage>>>,
+                           candidates: Arc<HashMap<usize, Candidate>>,
+                           ballot: Ballot) -> Result<()> {
+        // Check the proofs
+        if !ballot.p1_prf_a.verify()? {
+            eprintln!("#{}: failed to verify proof-of-knowledge for a", info.index);
+            return Ok(());
+        }
+        if !ballot.p1_prf_b.verify()? {
+            eprintln!("#{}: failed to verify proof-of-knowledge for b", info.index);
+            return Ok(());
+        }
+        if !ballot.p1_prf_r_a.verify()? {
+            eprintln!("#{}: failed to verify proof-of-knowledge for r_a", info.index);
+            return Ok(());
+        }
+        if !ballot.p1_prf_r_b.verify()? {
+            eprintln!("#{}: failed to verify proof-of-knowledge for r_b", info.index);
+            return Ok(());
+        }
+
+        let encoded_voter_id = ballot.p2_id.try_as_curve_elem()?;
+        if info.pubkey.encrypt(&info.ctx, &encoded_voter_id, &ballot.p2_prf_enc) != ballot.p2_enc_id {
+            eprintln!("#{}: failed to verify proof-of-encryption for voter ID", info.index);
+            return Ok(());
+        }
+
+        match Vote::from_string(&ballot.p1_vote, &candidates) {
+            None => {
+                eprintln!("#{}: invalid vote encoding", info.index);
+                return Ok(());
+            },
+            Some(_vote) => {
+                // println!("#{}: received vote:\n{}", info.index, vote.pretty());
+            }
+        }
+
+        // Re-randomise encryptions
+        let r = info.ctx.random_power()?;
+        let enc_id = info.pubkey.rerand(&info.ctx, &ballot.p2_enc_id, &r);
+        let r = info.ctx.random_power()?;
+        let enc_a = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_a, &r);
+        let r = info.ctx.random_power()?;
+        let enc_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_b, &r);
+        let r = info.ctx.random_power()?;
+        let enc_r_a = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_a, &r);
+        let r = info.ctx.random_power()?;
+        let enc_r_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_b, &r);
+
+        let vote = ballot.p1_vote;
+
+        // Construct message
+        let inner = TrusteeMessage::EcVote { vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b };
+        let data = serde_json::to_string(&inner)?.as_bytes().to_vec();
+        let signature = info.signing_keypair.sign(&data).as_ref().to_vec();
+
+        let msg = SignedMessage {
+            inner,
+            signature,
+            sender_id: info.id,
+        };
+
+        // Add it to the store
+        received_votes.lock().unwrap().push(msg);
+
+        Ok(())
+    }
 }

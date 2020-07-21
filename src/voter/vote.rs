@@ -13,9 +13,17 @@ impl Candidate {
             name: name.to_string(), id
         }
     }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Vote {
     preferences: HashMap<Candidate, usize>,
 }
@@ -31,7 +39,7 @@ impl Vote {
         self.preferences.insert(candidate.clone(), preference);
     }
 
-    pub fn from_string(encoded: String, candidates: HashMap<usize, Candidate>) -> Option<Self> {
+    pub fn from_string(encoded: &str, candidates: &HashMap<usize, Candidate>) -> Option<Self> {
         let mut preferences = HashMap::new();
         for (i, c) in encoded.chars().enumerate() {
             if let Some(pref) = char::to_digit(c, 10) {
@@ -42,6 +50,21 @@ impl Vote {
         }
 
         Some(Self { preferences })
+    }
+
+    pub fn pretty(&self) -> String {
+        let mut reversed = self.preferences.iter().collect::<Vec<_>>();
+        reversed.sort_by_key(|(_, key)| **key);
+        let reversed = reversed.into_iter()
+            .map(|(candidate, key)| (key + 1, candidate))
+            .collect::<Vec<_>>();
+
+        let mut result = String::new();
+        for (preference, candidate) in reversed.into_iter() {
+            result += &format!("\t{}. {}\n", preference, candidate.name());
+        }
+
+        result
     }
 }
 
