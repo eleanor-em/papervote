@@ -6,7 +6,6 @@ use cryptid::{CryptoError, Scalar, Hasher};
 use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext, CurveElem};
 use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty, KeygenCommitment};
 use cryptid::AsBase64;
-use eyre::Result;
 use reqwest::Client;
 use serde::{Serialize, Deserialize};
 use tokio::time;
@@ -19,7 +18,7 @@ use crate::wbb::api::{Response, WrappedResponse, address};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::voter::{VoterMessage, Ballot, VoterId};
+use crate::voter::{VoterMessage, Ballot, VoterId, VoterError};
 use cryptid::zkp::PrfKnowDlog;
 use std::sync::{Arc, Mutex};
 use ring::signature::KeyPair;
@@ -27,10 +26,14 @@ use crate::voter::vote::{Vote, Candidate};
 use futures::future::AbortHandle;
 use crate::wbb::api;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub enum TrusteeError {
     NoSuchTrustee(Uuid),
     Crypto(CryptoError),
+    Io(std::io::Error),
+    Serde(serde_json::Error),
+    Net(reqwest::Error),
+    Voter(VoterError),
     InvalidSignature,
     InvalidResponse,
     MissingRegistration,
@@ -48,6 +51,30 @@ impl Display for TrusteeError {
 impl From<CryptoError> for TrusteeError {
     fn from(e: CryptoError) -> Self {
         Self::Crypto(e)
+    }
+}
+
+impl From<std::io::Error> for TrusteeError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for TrusteeError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Serde(e)
+    }
+}
+
+impl From<reqwest::Error> for TrusteeError {
+    fn from(e: reqwest::Error) -> Self {
+        Self::Net(e)
+    }
+}
+
+impl From<VoterError> for TrusteeError {
+    fn from(e: VoterError) -> Self {
+        Self::Voter(e)
     }
 }
 
@@ -204,7 +231,7 @@ impl GeneratingTrustee {
         Ok(result)
     }
 
-    pub async fn receive_shares(&mut self) -> Result<()> {
+    pub async fn receive_shares(&mut self) -> Result<(), TrusteeError> {
         let index = self.trustee_info[&self.id].index;
         let addr = &self.trustee_info[&self.id].address;
 
@@ -259,7 +286,7 @@ impl GeneratingTrustee {
         }
     }
 
-    async fn send_share(address: String, msg: SignedMessage) -> Result<()> {
+    async fn send_share(address: String, msg: SignedMessage) -> Result<(), TrusteeError> {
         loop {
             // Wait a moment for the socket to open
             time::delay_for(Duration::from_millis(200)).await;
@@ -270,7 +297,7 @@ impl GeneratingTrustee {
         }
     }
 
-    async fn get_registrations(&mut self, my_registration: &SignedMessage, client: &Client) -> Result<()> {
+    async fn get_registrations(&mut self, my_registration: &SignedMessage, client: &Client) -> Result<(), TrusteeError> {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
@@ -302,7 +329,7 @@ impl GeneratingTrustee {
         Ok(())
     }
 
-    async fn get_commitments(&mut self, my_commit: &SignedMessage, client: &Client) -> Result<()> {
+    async fn get_commitments(&mut self, my_commit: &SignedMessage, client: &Client) -> Result<(), TrusteeError> {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
@@ -336,7 +363,7 @@ impl GeneratingTrustee {
         }
     }
 
-    async fn get_signatures(&mut self, my_sig: &SignedMessage, client: &Client) -> Result<()> {
+    async fn get_signatures(&mut self, my_sig: &SignedMessage, client: &Client) -> Result<(), TrusteeError> {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
@@ -396,7 +423,7 @@ impl Trustee {
                       ctx: CryptoContext,
                       index: usize,
                       min_trustees: usize,
-                      trustee_count: usize) -> Result<Trustee> {
+                      trustee_count: usize) -> Result<Trustee, TrusteeError> {
         let mut trustee = GeneratingTrustee::new(session_id.clone(), &ctx, index, min_trustees, trustee_count)?;
         let client = reqwest::Client::new();
 
@@ -483,7 +510,7 @@ impl Trustee {
         self.info.address.clone()
     }
 
-    pub async fn close_votes(&self, expected: usize) -> Result<()> {
+    pub async fn close_votes(&self, expected: usize) -> Result<(), TrusteeError> {
         let mut count = 0;
         loop {
             let current = self.received_votes.lock().unwrap().len() ;
@@ -525,7 +552,7 @@ impl Trustee {
 
     async fn receive_voter_data_task(info: InternalInfo,
                                      received_votes: Arc<Mutex<Vec<SignedMessage>>>,
-                                     candidates: Arc<HashMap<usize, Candidate>>) -> Result<()> {
+                                     candidates: Arc<HashMap<usize, Candidate>>) -> Result<(), TrusteeError> {
         let mut listener = TcpListener::bind(&info.address).await?;
 
         while let Some(stream) = listener.next().await {
@@ -540,7 +567,7 @@ impl Trustee {
     async fn receive_voter_data_inner(mut stream: TcpStream,
                                       info: InternalInfo,
                                       received_votes: Arc<Mutex<Vec<SignedMessage>>>,
-                                      candidates: Arc<HashMap<usize, Candidate>>) -> Result<()> {
+                                      candidates: Arc<HashMap<usize, Candidate>>) -> Result<(), TrusteeError> {
         // Read entire stream
         let mut buffer = String::new();
         stream.read_to_string(&mut buffer).await?;
@@ -575,7 +602,7 @@ impl Trustee {
                               enc_mac: Ciphertext,
                               enc_vote: Ciphertext,
                               prf_know_mac: PrfKnowDlog,
-                              prf_know_vote: PrfKnowDlog) -> Result<()> {
+                              prf_know_vote: PrfKnowDlog) -> Result<(), TrusteeError> {
         // Check the proofs
         if !prf_know_mac.verify()? {
             eprintln!("#{}: failed to verify MAC proof-of-knowledge", info.index);
@@ -618,7 +645,7 @@ impl Trustee {
     async fn handle_ballot(mut info: InternalInfo,
                            received_votes: Arc<Mutex<Vec<SignedMessage>>>,
                            candidates: Arc<HashMap<usize, Candidate>>,
-                           ballot: Ballot) -> Result<()> {
+                           ballot: Ballot) -> Result<(), TrusteeError> {
         // Check the proofs
         if !ballot.p1_prf_a.verify()? {
             eprintln!("#{}: failed to verify proof-of-knowledge for a", info.index);
@@ -666,7 +693,8 @@ impl Trustee {
         let enc_r_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_b, &r);
 
         let vote = ballot.p1_vote;
-        let vote_value = u128::from_str_radix(&vote, 10)?;
+        let vote_value = u128::from_str_radix(&vote, 10)
+            .map_err(|_| TrusteeError::Voter(VoterError::Decode))?;
         let vote_value: Scalar = vote_value.into();
         let prf_enc_vote = info.ctx.random_power()?;
         let enc_vote = info.pubkey.encrypt(&info.ctx, &CurveElem::try_encode(vote_value)?, &prf_enc_vote);

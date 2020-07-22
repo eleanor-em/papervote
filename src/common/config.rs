@@ -9,7 +9,6 @@ pub struct PapervoteConfig {
     pub db_pass: String,
     pub db_name: String,
     pub api_url: String,
-    pub pedersen_h: String,
 }
 
 impl Default for PapervoteConfig {
@@ -22,8 +21,6 @@ impl Default for PapervoteConfig {
             db_pass: "password".to_string(),
             db_name: "papervote".to_string(),
             api_url: "http://localhost:8000/api/".to_string(),
-            // TODO: prove this isn't trapdoored
-            pedersen_h: "ArDSLGmOZhHbBsbxvoLSjF0KYAsUMBYXkTTukhvkV1U=".to_string(),
         }
     }
 }

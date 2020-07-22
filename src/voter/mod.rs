@@ -3,10 +3,9 @@ use std::convert::TryInto;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use cryptid::Scalar;
+use cryptid::{Scalar, CryptoError};
 use cryptid::elgamal::{CryptoContext, Ciphertext, PublicKey, CurveElem};
 use cryptid::zkp::PrfKnowDlog;
-use eyre::Result;
 use serde::{Serialize, Deserialize};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -19,12 +18,34 @@ use crate::voter::vote::Vote;
 use crate::wbb::api::{WrappedResponse, Response};
 use crate::wbb::api;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum VoterError {
     Api(Response),
+    Crypto(CryptoError),
+    Io(std::io::Error),
+    Net(reqwest::Error),
     VoteMissing,
     Encode,
+    Decode,
     PostMissing,
+}
+
+impl From<CryptoError> for VoterError {
+    fn from(e: CryptoError) -> Self {
+        Self::Crypto(e)
+    }
+}
+
+impl From<std::io::Error> for VoterError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<reqwest::Error> for VoterError {
+    fn from(e: reqwest::Error) -> Self {
+        Self::Net(e)
+    }
 }
 
 impl Display for VoterError {
@@ -98,7 +119,11 @@ pub struct Voter {
 }
 
 impl Voter {
-    pub fn new(session_id: Uuid, pubkey: PublicKey, mut ctx: CryptoContext, commit_ctx: PedersenCtx, voter_id: String) -> Result<Self> {
+    pub fn new(session_id: Uuid,
+               pubkey: PublicKey,
+               mut ctx: CryptoContext,
+               commit_ctx: PedersenCtx,
+               voter_id: String) -> Result<Self, VoterError> {
         Ok(Self {
             session_id,
             pubkey,
@@ -117,7 +142,7 @@ impl Voter {
         &self.voter_id.0
     }
 
-    pub async fn post_init_commit(&self) -> Result<()> {
+    pub async fn post_init_commit(&self) -> Result<(), VoterError> {
         let msg = VoterMessage::InitialCommit {
             voter_id: self.voter_id.clone(),
             c_a: self.commit_ctx.commit(&self.a.into(), &self.r_a.into()),
@@ -135,15 +160,17 @@ impl Voter {
         Ok(())
     }
 
-    pub async fn post_ec_commit(&mut self, address: &str) -> Result<()> {
+    pub async fn post_ec_commit(&mut self, address: &str) -> Result<(), VoterError> {
         // Send the commit
         let msg = self.get_ec_commit()?;
         let mut stream = TcpStream::connect(address).await?;
-        stream.write_all(serde_json::to_string(&msg)?.as_ref()).await?;
+        stream.write_all(serde_json::to_string(&msg)
+            .map_err(|_| VoterError::Encode)?
+            .as_ref()).await?;
         Ok(())
     }
 
-    pub async fn check_ec_commit(&mut self) -> Result<()> {
+    pub async fn check_ec_commit(&mut self) -> Result<(), VoterError> {
         let client = reqwest::Client::new();
         time::delay_for(Duration::from_millis(1000)).await;
 
@@ -159,11 +186,11 @@ impl Voter {
         }
     }
 
-    pub async fn post_vote(&mut self, address: &str) -> Result<()> {
-        let (a, prf_a) = self.encrypt(&self.a.try_into()?)?;
-        let (b, prf_b) = self.encrypt(&self.b.try_into()?)?;
-        let (r_a, prf_r_a) = self.encrypt(&self.r_a.try_into()?)?;
-        let (r_b, prf_r_b) = self.encrypt(&self.r_b.try_into()?)?;
+    pub async fn post_vote(&mut self, address: &str) -> Result<(), VoterError> {
+        let (a, prf_a) = self.encrypt(&self.a.clone())?;
+        let (b, prf_b) = self.encrypt(&self.b.clone())?;
+        let (r_a, prf_r_a) = self.encrypt(&self.r_a.clone())?;
+        let (r_b, prf_r_b) = self.encrypt(&self.r_b.clone())?;
         let (id, prf_id) = self.encrypt(&self.voter_id.try_as_curve_elem()?)?;
 
         let g = self.ctx.generator();
@@ -185,7 +212,9 @@ impl Voter {
 
         let msg = VoterMessage::Ballot(ballot);
         let mut stream = TcpStream::connect(address).await?;
-        stream.write_all(serde_json::to_string(&msg)?.as_ref()).await?;
+        stream.write_all(serde_json::to_string(&msg)
+            .map_err(|_| VoterError::Encode)?
+            .as_ref()).await?;
 
         Ok(())
     }
@@ -206,13 +235,13 @@ impl Voter {
         self.get_encoded_vote().map(|scalar| a * scalar + b)
     }
 
-    fn encrypt(&mut self, m: &CurveElem) -> Result<(Ciphertext, Scalar)> {
+    fn encrypt(&mut self, m: &CurveElem) -> Result<(Ciphertext, Scalar), VoterError> {
         let r = self.ctx.random_power()?;
         let ct = self.pubkey.encrypt(&self.ctx, m, &r);
         Ok((ct, r))
     }
 
-    fn get_ec_commit(&mut self) -> Result<VoterMessage> {
+    fn get_ec_commit(&mut self) -> Result<VoterMessage, VoterError> {
         if self.vote.is_none() {
             Err(VoterError::VoteMissing)?;
         }

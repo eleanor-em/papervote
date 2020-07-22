@@ -5,7 +5,6 @@ use std::fmt::{Display, Formatter};
 use cryptid::{AsBase64, Scalar};
 use cryptid::elgamal::{PublicKey, Ciphertext};
 use cryptid::threshold::KeygenCommitment;
-use eyre::Report;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -18,10 +17,18 @@ use crate::voter::VoterId;
 
 #[derive(Debug)]
 pub enum DbError {
+    Config(confy::ConfyError),
+    Connect,
     Sql(tokio_postgres::Error),
     SchemaFailure(&'static str),
     InsertAlreadyExists,
     NotEnoughRows,
+}
+
+impl From<confy::ConfyError> for DbError {
+    fn from(e: confy::ConfyError) -> Self {
+        Self::Config(e)
+    }
 }
 
 impl From<tokio_postgres::Error> for DbError {
@@ -43,7 +50,7 @@ pub struct DbClient {
 }
 
 impl DbClient {
-    pub async fn new() -> Result<Self, Report> {
+    pub async fn new() -> Result<Self, DbError> {
         let cfg: PapervoteConfig = confy::load(APP_NAME)?;
         let (client, conn) = tokio_postgres::Config::new()
             .host(&cfg.db_host)
@@ -51,7 +58,8 @@ impl DbClient {
             .password(&cfg.db_pass)
             .dbname(&cfg.db_name)
             .connect(tokio_postgres::NoTls)
-            .await?;
+            .await
+            .map_err(|_| DbError::Connect)?;
 
         tokio::spawn(async move {
             if let Err(e) = conn.await {
@@ -66,9 +74,7 @@ impl DbClient {
         Ok(client)
     }
 
-    // TODO: Pedersen commitment parameters
-
-    async fn init(&self) -> Result<(), Report> {
+    async fn init(&self) -> Result<(), DbError> {
         self.client.batch_execute("
             CREATE TABLE IF NOT EXISTS trustees (
                 id              SERIAL PRIMARY KEY,
@@ -413,7 +419,7 @@ impl DbClient {
         Ok(row.get(0))
     }
 
-    async fn reset(&self) -> Result<(), Report> {
+    async fn reset(&self) -> Result<(), DbError> {
         self.client.execute("
             DROP TABLE IF EXISTS
                 trustees, sessions, parameters, parameter_signatures, keygen_commitments,

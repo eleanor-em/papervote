@@ -7,8 +7,6 @@ use serde::{Serialize, Deserialize};
 use serde::export::Formatter;
 
 use uuid::Uuid;
-use num_bigint::BigUint;
-use num_traits::{Zero, One};
 use std::convert::TryFrom;
 
 #[derive(Clone)]
@@ -20,13 +18,13 @@ pub struct PedersenCtx {
 impl PedersenCtx {
     pub fn new(session_id: &Uuid, ctx: CryptoContext) -> Self {
         let mut h = None;
-        let mut count = BigUint::zero();
+        let mut count: u128 = 0;
 
         loop {
             // SHA-512 for 64 bytes of entropy
             let bytes = Hasher::sha_512()
                 .and_update(session_id.as_bytes())
-                .and_update(&count.to_bytes_be())
+                .and_update(&count.to_be_bytes())
                 .finish_vec();
 
             let s = Scalar::try_from(bytes).unwrap();
@@ -35,7 +33,7 @@ impl PedersenCtx {
                 break;
             }
 
-            count += BigUint::one();
+            count += 1;
         }
 
         Self::from(ctx, h.unwrap())

@@ -1,7 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use eyre::Report;
 use futures::{executor, TryFutureExt};
 use rocket::State;
 use rocket_contrib::json::Json;
@@ -25,7 +24,7 @@ pub struct Api {
 }
 
 impl Api {
-    pub async fn new() -> Result<Self, Report> {
+    pub async fn new() -> Result<Self, DbError> {
         // locking doesn't seem to be necessary here...
         let db = Arc::new(DbClient::new().await?);
 
