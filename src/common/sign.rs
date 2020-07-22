@@ -35,7 +35,7 @@ impl SignedMessage {
     }
 }
 
-pub fn new_keypair(rng: Arc<Mutex<SystemRandom>>) -> Result<Ed25519KeyPair, CryptoError> {
+pub fn new_keypair(rng: Arc<Mutex<SystemRandom>>) -> Result<SigningKeypair, CryptoError> {
     let rng = rng.lock().unwrap();
     let bytes = signature::Ed25519KeyPair::generate_pkcs8(rng.deref())
         .map_err(|e| CryptoError::Unspecified(e))?;

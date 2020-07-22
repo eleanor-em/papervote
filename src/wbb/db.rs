@@ -1,17 +1,19 @@
-use tokio_postgres::Client;
-use eyre::Report;
-use crate::common::config::PapervoteConfig;
-use crate::APP_NAME;
+use std::convert::TryInto;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use uuid::Uuid;
-use crate::common::sign::{SignedMessage, SigningPubKey};
-use std::convert::TryInto;
-use crate::trustee::{TrusteeInfo, TrusteeMessage};
+
+use cryptid::{AsBase64, Scalar};
 use cryptid::elgamal::{PublicKey, Ciphertext};
 use cryptid::threshold::KeygenCommitment;
+use eyre::Report;
+use tokio_postgres::Client;
+use uuid::Uuid;
+
+use crate::APP_NAME;
 use crate::common::commit::Commitment;
-use cryptid::AsBase64;
+use crate::common::config::PapervoteConfig;
+use crate::common::sign::{SignedMessage, SigningPubKey};
+use crate::trustee::{TrusteeInfo, TrusteeMessage};
 use crate::voter::VoterId;
 
 #[derive(Debug)]
@@ -126,6 +128,8 @@ impl DbClient {
                 id              SERIAL PRIMARY KEY,
                 session         UUID NOT NULL,
                 vote            TEXT NOT NULL,
+                enc_vote        TEXT UNIQUE NOT NULL,
+                prf_enc_vote    TEXT UNIQUE NOT NULL,
                 enc_voter_id    TEXT UNIQUE NOT NULL,
                 enc_param_a     TEXT UNIQUE NOT NULL,
                 enc_param_b     TEXT UNIQUE NOT NULL,
@@ -242,6 +246,8 @@ impl DbClient {
     pub async fn insert_ec_vote(&self,
                                 session: &Uuid,
                                 vote: String,
+                                enc_vote: &Ciphertext,
+                                prf_enc_vote: &Scalar,
                                 enc_id: &Ciphertext,
                                 enc_a: &Ciphertext,
                                 enc_b: &Ciphertext,
@@ -250,9 +256,9 @@ impl DbClient {
                                 signed_by: &Uuid,
                                 signature: &[u8]) -> Result<(), DbError> {
         let result = self.client.execute("
-            INSERT INTO wbb_votes(session, vote, enc_voter_id, enc_param_a, enc_param_b, enc_param_r_a, enc_param_r_b, signed_by, signature)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
-        ", &[session, &vote, &enc_id.to_string(), &enc_a.to_string(), &enc_b.to_string(),
+            INSERT INTO wbb_votes(session, vote, enc_vote, prf_enc_vote, enc_voter_id, enc_param_a, enc_param_b, enc_param_r_a, enc_param_r_b, signed_by, signature)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
+        ", &[session, &vote, &enc_vote.to_string(), &prf_enc_vote.as_base64(), &enc_id.to_string(), &enc_a.to_string(), &enc_b.to_string(),
             &enc_r_a.to_string(), &enc_r_b.to_string(), signed_by, &base64::encode(signature)]).await?;
 
         if result > 0 {

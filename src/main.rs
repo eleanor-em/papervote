@@ -1,22 +1,21 @@
 #![feature(async_closure)]
-
-use std::thread;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use cryptid::elgamal::{CryptoContext, PublicKey};
 use eyre::Result;
-use papervote::APP_NAME;
-use papervote::wbb::api::{Api, NewSessionRequest, WrappedResponse};
-use uuid::Uuid;
-use papervote::common::config::PapervoteConfig;
-use papervote::trustee::Trustee;
-use papervote::voter::Voter;
-use papervote::common::commit::PedersenCtx;
-use papervote::voter::vote::{Vote, Candidate};
-use std::collections::HashMap;
-use std::sync::Arc;
 use rand::seq::SliceRandom;
 use tokio::time::Duration;
 use tokio::time;
+use uuid::Uuid;
+
+use papervote::APP_NAME;
+use papervote::common::commit::PedersenCtx;
+use papervote::common::config::PapervoteConfig;
+use papervote::trustee::Trustee;
+use papervote::voter::Voter;
+use papervote::voter::vote::{Vote, Candidate};
+use papervote::wbb::api::{Api, NewSessionRequest, WrappedResponse};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,77 +23,26 @@ async fn main() -> Result<()> {
     let cfg: PapervoteConfig = confy::load(APP_NAME)?;
     let session_id = Uuid::new_v4();
     let ctx = CryptoContext::new();
+    let commit_ctx = PedersenCtx::new(ctx.clone());
 
-    let min_trustees = cfg.min_trustees;
-    let trustee_count = cfg.trustee_count;
-
-    // Start web listener
     let api = Api::new().await?;
-    thread::spawn(move || api.start());
+    std::thread::spawn(move || api.start());
 
-    // Open session
-    let client = reqwest::Client::new();
-    let req = NewSessionRequest {
-        min_trustees,
-        trustee_count
-    };
-    let res: WrappedResponse = client.post(&format!("{}{}/new", cfg.api_url, session_id))
-        .json(&req)
-        .send().await?
-        .json().await?;
-    if !res.status {
-        panic!("Failed opening session: {:?}", res.msg);
-    }
+    open_session(&cfg, session_id.clone()).await?;
 
-    println!("Creating trustees...");
-    // Create trustees
-    let mut futures = Vec::new();
-    for index in 1..trustee_count + 1 {
-        let session_id = session_id.clone();
-        let ctx = ctx.clone();
-        futures.push(tokio::spawn(Trustee::new(session_id, ctx, index, min_trustees, trustee_count)));
-    }
-
-    let mut trustees = Vec::new();
-
-    for future in futures {
-        let trustee = future.await??;
-        trustees.push(trustee);
-    }
-
-
-    // Produce election parameters
+    let candidates = get_candidates();
+    let mut trustees = create_trustees(&cfg, ctx.clone(), session_id.clone()).await?;
     let pubkey = trustees[0].pubkey();
-    let alice = Candidate::new("Alice", 0);
-    let bob = Candidate::new("Bob", 1);
-    let carol = Candidate::new("Carol", 2);
-    let dave = Candidate::new("Dave", 3);
-    let edward = Candidate::new("Edward", 4);
-    let fringilla = Candidate::new("Fringilla", 5);
-    let gertrude = Candidate::new("Gertrude", 6);
-    let mut candidates = HashMap::new();
-    candidates.insert(alice.id(), alice.clone());
-    candidates.insert(bob.id(), bob.clone());
-    candidates.insert(carol.id(), carol.clone());
-    candidates.insert(dave.id(), dave.clone());
-    candidates.insert(edward.id(), edward.clone());
-    candidates.insert(fringilla.id(), fringilla.clone());
-    candidates.insert(gertrude.id(), gertrude.clone());
-    let candidates = Arc::new(candidates);
-    println!("Creating parameters...");
 
-    // Let the EC begin listening
     let ec = &mut trustees[0];
     ec.receive_voter_data(candidates.clone());
-    // Wait for EC to start properly
     time::delay_for(Duration::from_millis(200)).await;
 
-    let commit_ctx = PedersenCtx::new(ctx.clone());
     let candidates: Vec<_> = candidates.values().collect();
 
     println!("Sending vote data...");
     let mut handles = Vec::new();
-    const N: usize = 10000;
+    const N: usize = 1000;
     for i in 0..N {
         let addr = ec.address();
         let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidates)?;
@@ -110,8 +58,66 @@ async fn main() -> Result<()> {
 
     println!("Votes closing soon...");
     ec.close_votes(N).await?;
+    time::delay_for(Duration::from_millis(500)).await;
 
     Ok(())
+}
+
+async fn create_trustees(cfg: &PapervoteConfig, ctx: CryptoContext, session_id: Uuid) -> Result<Vec<Trustee>> {
+    // Create trustees
+    let mut futures = Vec::new();
+    for index in 1..cfg.trustee_count + 1 {
+        let session_id = session_id.clone();
+        let ctx = ctx.clone();
+        futures.push(tokio::spawn(Trustee::new(session_id, ctx, index, cfg.min_trustees, cfg.trustee_count)));
+    }
+
+    let mut trustees = Vec::new();
+
+    for future in futures {
+        let trustee = future.await??;
+        trustees.push(trustee);
+    }
+
+    Ok(trustees)
+}
+
+async fn open_session(cfg: &PapervoteConfig, session_id: Uuid) -> Result<()> {
+    let client = reqwest::Client::new();
+    let req = NewSessionRequest {
+        min_trustees: cfg.min_trustees,
+        trustee_count: cfg.trustee_count,
+    };
+
+    let res: WrappedResponse = client.post(&format!("{}{}/new", cfg.api_url, session_id))
+        .json(&req)
+        .send().await?
+        .json().await?;
+
+    if !res.status {
+        panic!("Failed opening session: {:?}", res.msg);
+    }
+
+    Ok(())
+}
+
+fn get_candidates() -> Arc<HashMap<usize, Candidate>> {
+    let alice = Candidate::new("Alice", 0);
+    let bob = Candidate::new("Bob", 1);
+    let carol = Candidate::new("Carol", 2);
+    let dave = Candidate::new("Dave", 3);
+    let edward = Candidate::new("Edward", 4);
+    let fringilla = Candidate::new("Fringilla", 5);
+    let gertrude = Candidate::new("Gertrude", 6);
+    let mut candidates = HashMap::new();
+    candidates.insert(alice.id(), alice.clone());
+    candidates.insert(bob.id(), bob.clone());
+    candidates.insert(carol.id(), carol.clone());
+    candidates.insert(dave.id(), dave.clone());
+    candidates.insert(edward.id(), edward.clone());
+    candidates.insert(fringilla.id(), fringilla.clone());
+    candidates.insert(gertrude.id(), gertrude.clone());
+    Arc::new(candidates)
 }
 
 async fn run_voter(mut voter: Voter, addr: String) -> Result<()> {
@@ -121,6 +127,7 @@ async fn run_voter(mut voter: Voter, addr: String) -> Result<()> {
         println!("{}: retrying ident", voter.id());
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
+    println!("{}: identified", voter.id());
 
     loop {
         if let Ok(()) = voter.post_ec_commit(&addr).await {
@@ -131,11 +138,13 @@ async fn run_voter(mut voter: Voter, addr: String) -> Result<()> {
         println!("{}: retrying commit", voter.id());
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
+    println!("{}: committed", voter.id());
 
     while let Err(_) = voter.post_vote(&addr).await{
         println!("{}: retrying vote", voter.id());
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
+    println!("{}: voted", voter.id());
 
     Ok(())
 

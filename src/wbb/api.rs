@@ -1,19 +1,19 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
+use eyre::Report;
+use futures::{executor, TryFutureExt};
 use rocket::State;
 use rocket_contrib::json::Json;
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
+use crate::APP_NAME;
+use crate::common::config::PapervoteConfig;
 use crate::common::sign::{SignedMessage, SigningPubKey};
 use crate::trustee::TrusteeMessage;
-use crate::wbb::db::{DbClient, DbError};
-use eyre::Report;
-use std::str::FromStr;
-use futures::{executor, TryFutureExt};
 use crate::voter::VoterMessage;
-use crate::common::config::PapervoteConfig;
-use crate::APP_NAME;
+use crate::wbb::db::{DbClient, DbError};
 
 pub fn address(session_id: &Uuid, path: &str) -> String {
     let cfg: PapervoteConfig = confy::load(APP_NAME).unwrap();
@@ -146,7 +146,6 @@ fn new_session_inner(state: State<'_, Api>, session: String, req: Json<NewSessio
         Ok(_) =>  success(Response::Ok),
         Err(_) => failure(Response::SessionExists)
     })
-
 }
 
 #[rocket::get("/api/<session>/trustee/all")]
@@ -335,9 +334,11 @@ fn post_ec_vote_inner(state: State<'_, Api>, session: String, msg: Json<SignedMe
     let session = Uuid::from_str(&session)
         .map_err(|_| failure(Response::InvalidSession))?;
 
-    let (vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b) = match &msg.inner {
-        TrusteeMessage::EcVote { vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b } => {
-            Ok((vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b))
+    let (vote, enc_vote, prf_enc_vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b) = match &msg.inner {
+        TrusteeMessage::EcVote {
+            vote, enc_vote, prf_enc_vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b
+        } => {
+            Ok((vote, enc_vote, prf_enc_vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b))
         },
         _ => Err(failure(Response::InvalidRequest))
     }?;
@@ -351,7 +352,7 @@ fn post_ec_vote_inner(state: State<'_, Api>, session: String, msg: Json<SignedMe
         return Err(failure(Response::InvalidSignature));
     }
 
-    executor::block_on(db.insert_ec_vote(&session, vote.clone(), enc_id, enc_a, enc_b, enc_r_a, enc_r_b, &msg.sender_id, &msg.signature))
+    executor::block_on(db.insert_ec_vote(&session, vote.clone(), enc_vote, prf_enc_vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b, &msg.sender_id, &msg.signature))
         .map_err(|e| {
             match e {
                 DbError::InsertAlreadyExists => failure(Response::FailedInsertion),

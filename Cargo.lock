@@ -293,7 +293,7 @@ dependencies = [
 [[package]]
 name = "cryptid"
 version = "0.4.0"
-source = "git+https://github.com/eleanor-em/cryptid#4ab088c590c6306bb801c591a0ffdf47261c2fd0"
+source = "git+https://github.com/eleanor-em/cryptid#0e151dff5c59f136317442e28e71ace2be17bb03"
 dependencies = [
  "base64 0.12.3",
  "curve25519-dalek",
@@ -1906,9 +1906,9 @@ checksum = "53953d2d3a5ad81d9f844a32f14ebb121f50b650cd59d0ee2a07cf13c617efed"
 
 [[package]]
 name = "tokio"
-version = "0.2.21"
+version = "0.2.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d099fa27b9702bed751524694adbe393e18b36b204da91eb1cbbbbb4a5ee2d58"
+checksum = "5d34ca54d84bf2b5b4d7d31e901a8464f7b60ac145a284fba25ceb801f2ddccd"
 dependencies = [
  "bytes",
  "fnv",

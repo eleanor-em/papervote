@@ -1,5 +1,6 @@
-use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
+
+use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct Candidate {

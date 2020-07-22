@@ -1,22 +1,23 @@
-use serde::{Serialize, Deserialize};
-use cryptid::elgamal::{CryptoContext, Ciphertext, PublicKey, CurveElem};
-use crate::common::commit::{PedersenCtx, Commitment};
+pub mod vote;
+use std::convert::{TryFrom, TryInto};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+
 use cryptid::Scalar;
-use eyre::Result;
+use cryptid::elgamal::{CryptoContext, Ciphertext, PublicKey, CurveElem};
 use cryptid::zkp::PrfKnowDlog;
+use eyre::Result;
+use serde::{Serialize, Deserialize};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio::time;
+use tokio::time::Duration;
+use uuid::Uuid;
+
+use crate::common::commit::{PedersenCtx, Commitment};
 use crate::voter::vote::Vote;
 use crate::wbb::api::{WrappedResponse, Response};
 use crate::wbb::api;
-use std::fmt::{Display, Formatter};
-use std::error::Error;
-use uuid::Uuid;
-use tokio::time;
-use tokio::time::Duration;
-use tokio::net::TcpStream;
-use tokio::io::AsyncWriteExt;
-use std::convert::{TryFrom, TryInto};
-
-pub mod vote;
 
 #[derive(Clone, Debug)]
 pub enum VoterError {

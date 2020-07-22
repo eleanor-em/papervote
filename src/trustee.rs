@@ -26,6 +26,7 @@ use ring::signature::KeyPair;
 use crate::voter::vote::{Vote, Candidate};
 use futures::future::AbortHandle;
 use crate::wbb::api;
+use std::convert::TryInto;
 
 #[derive(Clone, Copy, Debug)]
 pub enum TrusteeError {
@@ -74,6 +75,8 @@ pub enum TrusteeMessage {
     },
     EcVote {
         vote: String,
+        enc_vote: Ciphertext,
+        prf_enc_vote: Scalar,
         enc_id: Ciphertext,
         enc_a: Ciphertext,
         enc_b: Ciphertext,
@@ -370,7 +373,7 @@ impl GeneratingTrustee {
 
 pub struct Trustee {
     info: InternalInfo,
-    trustee_info: HashMap<Uuid, TrusteeInfo>,
+    _trustee_info: HashMap<Uuid, TrusteeInfo>,
     received_votes: Arc<Mutex<Vec<SignedMessage>>>,
     party: ThresholdParty,
     abort_handle: Option<AbortHandle>,
@@ -460,7 +463,7 @@ impl Trustee {
         // TODO: Store on disk.
         Ok(Trustee {
             info,
-            trustee_info: trustee.trustee_info,
+            _trustee_info: trustee.trustee_info,
             received_votes: Arc::new(Mutex::new(Vec::new())),
             party,
             abort_handle: None,
@@ -490,7 +493,7 @@ impl Trustee {
             }
             println!("waiting for votes... ({}/{})", current, expected);
             count += 1;
-            time::delay_for(Duration::from_millis(500)).await;
+            time::delay_for(Duration::from_millis(1000)).await;
         }
 
         if let Some(handle) = &self.abort_handle {
@@ -656,9 +659,15 @@ impl Trustee {
         let enc_r_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_b, &r);
 
         let vote = ballot.p1_vote;
+        let encoded = u128::from_str_radix(&vote, 10)?;
+        let encoded: Scalar = encoded.into();
+        let prf_enc_vote = info.ctx.random_power()?;
+        let enc_vote = info.pubkey.encrypt(&info.ctx, &encoded.try_into()?, &prf_enc_vote);
 
         // Construct message
-        let inner = TrusteeMessage::EcVote { vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b };
+        let inner = TrusteeMessage::EcVote {
+            vote, enc_vote, prf_enc_vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b
+        };
         let data = serde_json::to_string(&inner)?.as_bytes().to_vec();
         let signature = info.signing_keypair.sign(&data).as_ref().to_vec();
 

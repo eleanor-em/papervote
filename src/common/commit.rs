@@ -1,11 +1,13 @@
-use serde::{Serialize, Deserialize};
-use cryptid::elgamal::{CryptoContext, CurveElem};
-use crate::common::config::PapervoteConfig;
-use crate::APP_NAME;
-use cryptid::{Scalar, AsBase64};
-use std::fmt::Debug;
-use serde::export::Formatter;
 use std::fmt;
+use std::fmt::Debug;
+
+use cryptid::{AsBase64, Scalar};
+use cryptid::elgamal::{CryptoContext, CurveElem};
+use serde::{Serialize, Deserialize};
+use serde::export::Formatter;
+
+use crate::APP_NAME;
+use crate::common::config::PapervoteConfig;
 
 #[derive(Clone)]
 pub struct PedersenCtx {
