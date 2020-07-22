@@ -1,13 +1,15 @@
 use std::fmt;
 use std::fmt::Debug;
 
-use cryptid::{AsBase64, Scalar};
+use cryptid::{AsBase64, Scalar, Hasher};
 use cryptid::elgamal::{CryptoContext, CurveElem};
 use serde::{Serialize, Deserialize};
 use serde::export::Formatter;
 
-use crate::APP_NAME;
-use crate::common::config::PapervoteConfig;
+use uuid::Uuid;
+use num_bigint::BigUint;
+use num_traits::{Zero, One};
+use std::convert::TryFrom;
 
 #[derive(Clone)]
 pub struct PedersenCtx {
@@ -16,12 +18,27 @@ pub struct PedersenCtx {
 }
 
 impl PedersenCtx {
-    pub fn new(ctx: CryptoContext) -> Self {
-        // TODO: prove h isn't trapdoored
-        let cfg: PapervoteConfig = confy::load(APP_NAME).unwrap();
-        let h = CurveElem::try_from_base64(cfg.pedersen_h.as_str()).unwrap();
+    pub fn new(session_id: &Uuid, ctx: CryptoContext) -> Self {
+        let mut h = None;
+        let mut count = BigUint::zero();
 
-        Self::from(ctx, h)
+        loop {
+            // SHA-512 for 64 bytes of entropy
+            let bytes = Hasher::sha_512()
+                .and_update(session_id.as_bytes())
+                .and_update(&count.to_bytes_be())
+                .finish_vec();
+
+            let s = Scalar::try_from(bytes).unwrap();
+            if let Ok(elem) = CurveElem::try_from(s) {
+                h.replace(elem);
+                break;
+            }
+
+            count += BigUint::one();
+        }
+
+        Self::from(ctx, h.unwrap())
     }
 
     pub fn from(ctx: CryptoContext, h: CurveElem) -> Self {

@@ -21,3 +21,6 @@ tokio-postgres = { version = "0", features = ["with-uuid-0_8", "with-serde_json-
 confy = "0"
 futures = "0"
 rand = "0"
+num-bigint = { version = "0", features = ["rand"] }
+num-traits = "0"
+num-integer = "0"

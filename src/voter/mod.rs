@@ -1,5 +1,5 @@
 pub mod vote;
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryInto;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -46,7 +46,7 @@ impl ToString for VoterId {
 
 impl VoterId {
     pub fn try_as_curve_elem(&self) -> Result<CurveElem, VoterError> {
-        CurveElem::try_from(self.0.as_bytes())
+        CurveElem::try_encode(self.0.as_bytes().to_vec().try_into().map_err(|_| VoterError::Encode)?)
             .map_err(|_| VoterError::Encode)
     }
 }

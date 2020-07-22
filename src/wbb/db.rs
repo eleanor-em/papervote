@@ -143,6 +143,7 @@ impl DbClient {
         Ok(())
     }
 
+    // TODO: Prepared statements
     pub async fn insert_session(&self, uuid: &Uuid, min_trustees: usize, trustee_count: usize) -> Result<(), DbError> {
         let result = self.client.execute("
             INSERT INTO sessions(uuid, min_trustees, trustee_count)

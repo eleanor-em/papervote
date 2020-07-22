@@ -1,5 +1,4 @@
-#![feature(decl_macro)]
-#![feature(assoc_char_funcs)]
+#![feature(async_closure, decl_macro, assoc_char_funcs)]
 
 pub mod wbb;
 pub mod trustee;

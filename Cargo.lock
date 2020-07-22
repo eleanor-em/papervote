@@ -293,7 +293,7 @@ dependencies = [
 [[package]]
 name = "cryptid"
 version = "0.4.0"
-source = "git+https://github.com/eleanor-em/cryptid#0e151dff5c59f136317442e28e71ace2be17bb03"
+source = "git+https://github.com/eleanor-em/cryptid#cd91e4036fce3cda2ad963faab02300eab990936"
 dependencies = [
  "base64 0.12.3",
  "curve25519-dalek",
@@ -1231,6 +1231,9 @@ dependencies = [
  "cryptid",
  "eyre",
  "futures",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
  "rand",
  "reqwest",
  "ring",

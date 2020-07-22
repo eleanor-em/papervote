@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt::{Formatter, Display};
 
 use cryptid::{CryptoError, Scalar, Hasher};
-use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext};
+use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext, CurveElem};
 use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty, KeygenCommitment};
 use cryptid::AsBase64;
 use eyre::Result;
@@ -26,7 +26,6 @@ use ring::signature::KeyPair;
 use crate::voter::vote::{Vote, Candidate};
 use futures::future::AbortHandle;
 use crate::wbb::api;
-use std::convert::TryInto;
 
 #[derive(Clone, Copy, Debug)]
 pub enum TrusteeError {
@@ -549,10 +548,18 @@ impl Trustee {
         if let Ok(msg) = serde_json::from_str::<VoterMessage>(&buffer) {
             match msg {
                 VoterMessage::EcCommit { voter_id, enc_mac, enc_vote, prf_know_mac, prf_know_vote } => {
-                    tokio::spawn(Self::handle_ec_commit(info.clone(), voter_id, enc_mac, enc_vote, prf_know_mac, prf_know_vote));
+                    tokio::spawn((async move || {
+                        if let Err(e) = Self::handle_ec_commit(info.clone(), voter_id, enc_mac, enc_vote, prf_know_mac, prf_know_vote).await {
+                            eprintln!("#{}: error handling commit: {}", info.index, e);
+                        }
+                    })());
                 },
                 VoterMessage::Ballot(ballot) => {
-                    tokio::spawn(Self::handle_ballot(info.clone(), received_votes.clone(), candidates.clone(), ballot));
+                    tokio::spawn((async move || {
+                        if let Err(e) = Self::handle_ballot(info.clone(), received_votes.clone(), candidates.clone(), ballot).await {
+                            eprintln!("#{}: error handling ballot: {}", info.index, e);
+                        }
+                    })());
                 },
                 _ => {
                     eprintln!("#{}: unrecognised message", info.index);
@@ -659,10 +666,10 @@ impl Trustee {
         let enc_r_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_b, &r);
 
         let vote = ballot.p1_vote;
-        let encoded = u128::from_str_radix(&vote, 10)?;
-        let encoded: Scalar = encoded.into();
+        let vote_value = u128::from_str_radix(&vote, 10)?;
+        let vote_value: Scalar = vote_value.into();
         let prf_enc_vote = info.ctx.random_power()?;
-        let enc_vote = info.pubkey.encrypt(&info.ctx, &encoded.try_into()?, &prf_enc_vote);
+        let enc_vote = info.pubkey.encrypt(&info.ctx, &CurveElem::try_encode(vote_value)?, &prf_enc_vote);
 
         // Construct message
         let inner = TrusteeMessage::EcVote {

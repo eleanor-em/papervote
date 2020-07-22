@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     let cfg: PapervoteConfig = confy::load(APP_NAME)?;
     let session_id = Uuid::new_v4();
     let ctx = CryptoContext::new();
-    let commit_ctx = PedersenCtx::new(ctx.clone());
+    let commit_ctx = PedersenCtx::new(&session_id, ctx.clone());
 
     let api = Api::new().await?;
     std::thread::spawn(move || api.start());
@@ -42,14 +42,14 @@ async fn main() -> Result<()> {
 
     println!("Sending vote data...");
     let mut handles = Vec::new();
-    const N: usize = 1000;
+    const N: usize = 50;
     for i in 0..N {
         let addr = ec.address();
         let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidates)?;
         handles.push(tokio::spawn(run_voter(voter, addr)));
 
         // give the threads a slight break to push through
-        if i > 0 && i % 1000 == 0 {
+        if i > 0 && i % 500 == 0 {
             time::delay_for(Duration::from_millis(1000)).await;
         }
     }
@@ -120,14 +120,13 @@ fn get_candidates() -> Arc<HashMap<usize, Candidate>> {
     Arc::new(candidates)
 }
 
-async fn run_voter(mut voter: Voter, addr: String) -> Result<()> {
+async fn run_voter(mut voter: Voter, addr: String) {
     const DELAY: u64 = 1000;
 
     while let Err(_) = voter.post_init_commit().await {
         println!("{}: retrying ident", voter.id());
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
-    println!("{}: identified", voter.id());
 
     loop {
         if let Ok(()) = voter.post_ec_commit(&addr).await {
@@ -138,16 +137,12 @@ async fn run_voter(mut voter: Voter, addr: String) -> Result<()> {
         println!("{}: retrying commit", voter.id());
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
-    println!("{}: committed", voter.id());
 
     while let Err(_) = voter.post_vote(&addr).await{
         println!("{}: retrying vote", voter.id());
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
     println!("{}: voted", voter.id());
-
-    Ok(())
-
 }
 
 fn random_voter(session_id: Uuid, pubkey: PublicKey, ctx: CryptoContext, commit_ctx: PedersenCtx, candidates: &[&Candidate]) -> Result<Voter> {
