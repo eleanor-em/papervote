@@ -20,7 +20,7 @@ impl Default for PapervoteConfig {
             db_user: "postgres".to_string(),
             db_pass: "password".to_string(),
             db_name: "papervote".to_string(),
-            api_url: "http://localhost:8000/api/".to_string(),
+            api_url: "http://localhost:8000/api".to_string(),
         }
     }
 }

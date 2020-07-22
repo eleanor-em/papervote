@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use ring::rand::SystemRandom;
 use std::ops::Deref;
 use std::convert::TryFrom;
-use crate::common::net::TrusteeMessage;
+use crate::net::TrusteeMessage;
 
 pub type SigningKeypair = Ed25519KeyPair;
 
@@ -50,7 +50,7 @@ pub struct SigningPubKey {
 
 impl Into<String> for SigningPubKey {
     fn into(self) -> String {
-        base64::encode(self.bytes)
+        base64::encode(&self.bytes)
     }
 }
 
@@ -59,7 +59,7 @@ impl TryFrom<String> for SigningPubKey {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Ok(Self {
-            bytes: base64::decode(value)?
+            bytes: base64::decode(&value)?
         })
     }
 }

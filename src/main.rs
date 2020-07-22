@@ -9,14 +9,14 @@ use tokio::time::Duration;
 use tokio::time;
 use uuid::Uuid;
 
-use papervote::APP_NAME;
-use papervote::common::commit::PedersenCtx;
-use papervote::common::config::PapervoteConfig;
-use papervote::trustee::Trustee;
-use papervote::voter::Voter;
-use papervote::wbb::api::Api;
-use papervote::common::vote::{Candidate, Vote};
-use papervote::common::net::{WrappedResponse, NewSessionRequest};
+use common::APP_NAME;
+use common::commit::PedersenCtx;
+use common::config::PapervoteConfig;
+use common::vote::{Candidate, Vote};
+use common::net::{WrappedResponse, NewSessionRequest};
+use trustee::Trustee;
+use voter::Voter;
+use wbb::api::Api;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
     for i in 0..N {
         let addr = ec.address();
         let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidates)?;
-        handles.push(tokio::spawn(run_voter(voter, addr)));
+        handles.push(tokio::spawn(run_voter(voter, cfg.api_url.clone(), addr)));
 
         // give the threads a slight break to push through
         if i > 0 && i % 500 == 0 {
@@ -70,7 +70,7 @@ async fn create_trustees(cfg: &PapervoteConfig, ctx: CryptoContext, session_id: 
     for index in 1..cfg.trustee_count + 1 {
         let session_id = session_id.clone();
         let ctx = ctx.clone();
-        futures.push(tokio::spawn(Trustee::new(session_id, ctx, index, cfg.min_trustees, cfg.trustee_count)));
+        futures.push(tokio::spawn(Trustee::new(cfg.api_url.clone(), session_id, ctx, index, cfg.min_trustees, cfg.trustee_count)));
     }
 
     let mut trustees = Vec::new();
@@ -121,17 +121,17 @@ fn get_candidates() -> Arc<HashMap<usize, Candidate>> {
     Arc::new(candidates)
 }
 
-async fn run_voter(mut voter: Voter, addr: String) {
+async fn run_voter(mut voter: Voter, api_base_addr: String, addr: String) {
     const DELAY: u64 = 1000;
 
-    while let Err(_) = voter.post_init_commit().await {
+    while let Err(_) = voter.post_init_commit(&api_base_addr).await {
         println!("{}: retrying ident", voter.id());
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
 
     loop {
         if let Ok(()) = voter.post_ec_commit(&addr).await {
-            if let Ok(()) = voter.check_ec_commit().await {
+            if let Ok(()) = voter.check_ec_commit(&api_base_addr).await {
                 break;
             }
         }

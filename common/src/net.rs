@@ -1,12 +1,10 @@
-use crate::common::sign::{SignedMessage, SigningPubKey};
+use crate::sign::{SignedMessage, SigningPubKey};
 use uuid::Uuid;
 use cryptid::threshold::KeygenCommitment;
 use cryptid::Scalar;
 use cryptid::elgamal::{PublicKey, Ciphertext};
 use serde::{Serialize, Deserialize};
-use crate::common::vote::VoterId;
-use crate::common::config::PapervoteConfig;
-use crate::APP_NAME;
+use crate::vote::VoterId;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TrusteeMessage {
@@ -50,7 +48,7 @@ pub struct TrusteeInfo {
 impl TrusteeInfo {
     pub fn into_signed_msg(self, signature: String) -> Result<SignedMessage, base64::DecodeError> {
         let sender_id = self.id.clone();
-        let signature = base64::decode(signature)?;
+        let signature = base64::decode(&signature)?;
 
         Ok(SignedMessage {
             inner: TrusteeMessage::Info { info: self },
@@ -90,9 +88,4 @@ pub enum Response {
 pub struct NewSessionRequest {
     pub min_trustees: usize,
     pub trustee_count: usize,
-}
-
-pub fn address(session_id: &Uuid, path: &str) -> String {
-    let cfg: PapervoteConfig = confy::load(APP_NAME).unwrap();
-    format!("{}{}{}", cfg.api_url, session_id, path)
 }

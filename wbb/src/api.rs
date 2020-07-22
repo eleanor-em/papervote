@@ -6,10 +6,10 @@ use rocket::State;
 use rocket_contrib::json::Json;
 use uuid::Uuid;
 
-use crate::common::sign::SignedMessage;
-use crate::wbb::db::{DbClient, DbError};
-use crate::common::net::{Response, WrappedResponse, TrusteeMessage, NewSessionRequest};
-use crate::common::vote::VoterMessage;
+use common::sign::SignedMessage;
+use crate::db::{DbClient, DbError};
+use common::net::{Response, WrappedResponse, TrusteeMessage, NewSessionRequest};
+use common::vote::VoterMessage;
 
 pub struct Api {
     db: Arc<DbClient>,

@@ -8,12 +8,12 @@ use cryptid::threshold::KeygenCommitment;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
-use crate::APP_NAME;
-use crate::common::commit::Commitment;
-use crate::common::config::PapervoteConfig;
-use crate::common::sign::{SignedMessage, SigningPubKey};
-use crate::common::net::{TrusteeMessage, TrusteeInfo};
-use crate::common::vote::VoterId;
+use common::APP_NAME;
+use common::commit::Commitment;
+use common::config::PapervoteConfig;
+use common::sign::{SignedMessage, SigningPubKey};
+use common::net::{TrusteeMessage, TrusteeInfo};
+use common::vote::VoterId;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -368,7 +368,7 @@ impl DbClient {
             let commitment: String = row.get("commitment");
             let commitment = commitment.try_into().map_err(|_| DbError::SchemaFailure("commitment"))?;
             let signature: String = row.get("signature");
-            let signature: Vec<u8> = base64::decode(signature).map_err(|_| DbError::SchemaFailure("signature"))?;
+            let signature: Vec<u8> = base64::decode(&signature).map_err(|_| DbError::SchemaFailure("signature"))?;
             let inner = TrusteeMessage::KeygenCommit { commitment };
 
             result.push(SignedMessage {
@@ -398,7 +398,7 @@ impl DbClient {
         for row in rows {
             let sender_id: Uuid = row.get("trustee");
             let signature: String = row.get("pubkey_sig");
-            let signature: Vec<u8> = base64::decode(signature).map_err(|_| DbError::SchemaFailure("signature"))?;
+            let signature: Vec<u8> = base64::decode(&signature).map_err(|_| DbError::SchemaFailure("signature"))?;
             let inner = TrusteeMessage::KeygenSign { pubkey };
 
             result.push(SignedMessage {

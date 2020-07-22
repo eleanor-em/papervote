@@ -1,7 +1,7 @@
 use cryptid::zkp::PrfKnowDlog;
 use cryptid::elgamal::{Ciphertext, CurveElem};
 use cryptid::Scalar;
-use crate::common::commit::Commitment;
+use crate::commit::Commitment;
 use std::convert::TryInto;
 use std::collections::HashMap;
 

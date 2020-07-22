@@ -6,27 +6,19 @@ edition = "2018"
 license = "GPL-3.0+"
 
 [dependencies]
-# Core libs
+common = { path = "common" }
+trustee = { path = "trustee" }
+voter = { path = "voter" }
+wbb = { path = "wbb" }
 tokio = { version = "0.2", features = ["full"] }
-futures = "0"
 rand = "0"
-
-# Crypto libs
 cryptid = { git = "https://github.com/eleanor-em/cryptid" }
-ring = "0"
-
-# Data libs
 uuid = { version = "0", features = ["serde", "v4"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-base64 = "0"
-
-# HTTP/SQL libs
-rocket = "0"
-rocket_contrib = { version = "0", default-features = false, features = ["json"] }
-reqwest = { version = "0", features = ["json"] }
-tokio-postgres = { version = "0", features = ["with-uuid-0_8", "with-serde_json-1"] }
-
-# Misc libs
 eyre = "0"
 confy = "0"
+futures = "0"
+reqwest = { version = "0", features = ["json"] }
+base64 = "0"
+
+[workspace]
+members = ["common", "trustee", "voter", "wbb"]

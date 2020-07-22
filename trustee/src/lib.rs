@@ -1,3 +1,4 @@
+#![feature(async_closure)]
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Formatter, Display};
@@ -11,8 +12,8 @@ use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
-use crate::common::sign;
-use crate::common::sign::{SignedMessage, SigningKeypair};
+use common::sign;
+use common::sign::{SignedMessage, SigningKeypair};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -20,9 +21,8 @@ use cryptid::zkp::PrfKnowDlog;
 use std::sync::{Arc, Mutex};
 use ring::signature::KeyPair;
 use futures::future::AbortHandle;
-use crate::common::net;
-use crate::common::net::{TrusteeMessage, TrusteeInfo, Response, WrappedResponse};
-use crate::common::vote::{VoterMessage, Candidate, VoterId, Ballot, Vote};
+use common::net::{TrusteeMessage, TrusteeInfo, Response, WrappedResponse};
+use common::vote::{VoterMessage, Candidate, VoterId, Ballot, Vote};
 
 #[derive(Debug)]
 pub enum TrusteeError {
@@ -73,6 +73,7 @@ impl From<reqwest::Error> for TrusteeError {
 impl Error for TrusteeError {}
 
 pub struct GeneratingTrustee {
+    api_base_addr: String,
     session_id: Uuid,
     id: Uuid,
     signing_keypair: SigningKeypair,
@@ -82,7 +83,7 @@ pub struct GeneratingTrustee {
 }
 
 impl GeneratingTrustee {
-    pub fn new(session_id: Uuid, ctx: &CryptoContext, index: usize, k: usize, n: usize) -> Result<GeneratingTrustee, CryptoError> {
+    pub fn new(api_base_addr: String, session_id: Uuid, ctx: &CryptoContext, index: usize, k: usize, n: usize) -> Result<GeneratingTrustee, CryptoError> {
         let mut ctx = ctx.clone();
         let id = Uuid::new_v4();
 
@@ -103,6 +104,7 @@ impl GeneratingTrustee {
         let generator = ThresholdGenerator::new(&mut ctx, index, k, n)?;
 
         Ok(Self {
+            api_base_addr,
             session_id,
             id,
             signing_keypair,
@@ -241,7 +243,7 @@ impl GeneratingTrustee {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&net::address(&self.session_id, "/trustee/all"))
+            let res: WrappedResponse = client.get(&format!("{}/{}/trustee/all", &self.api_base_addr, &self.session_id))
                 .send().await?
                 .json().await?;
 
@@ -273,7 +275,7 @@ impl GeneratingTrustee {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&net::address(&self.session_id, "/keygen/commitment/all"))
+            let res: WrappedResponse = client.get(&format!("{}/{}/keygen/commitment/all", self.api_base_addr, self.session_id))
                 .send().await?
                 .json().await?;
 
@@ -307,7 +309,7 @@ impl GeneratingTrustee {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&net::address(&self.session_id, "/keygen/sign/all"))
+            let res: WrappedResponse = client.get(&format!("{}/{}/keygen/sign/all", &self.api_base_addr, &self.session_id))
                 .send().await?
                 .json().await?;
 
@@ -348,6 +350,7 @@ pub struct Trustee {
 
 #[derive(Clone)]
 struct InternalInfo {
+    api_base_addr: String,
     address: String,
     index: usize,
     id: Uuid,
@@ -359,17 +362,18 @@ struct InternalInfo {
 }
 
 impl Trustee {
-    pub async fn new(session_id: Uuid,
-                      ctx: CryptoContext,
-                      index: usize,
-                      min_trustees: usize,
-                      trustee_count: usize) -> Result<Trustee, TrusteeError> {
-        let mut trustee = GeneratingTrustee::new(session_id.clone(), &ctx, index, min_trustees, trustee_count)?;
+    pub async fn new(api_base_addr: String,
+                     session_id: Uuid,
+                     ctx: CryptoContext,
+                     index: usize,
+                     min_trustees: usize,
+                     trustee_count: usize) -> Result<Trustee, TrusteeError> {
+        let mut trustee = GeneratingTrustee::new(api_base_addr.clone(), session_id.clone(), &ctx, index, min_trustees, trustee_count)?;
         let client = reqwest::Client::new();
 
         // 1. Registration
         let msg = trustee.gen_registration();
-        let response: WrappedResponse = client.post(&net::address(trustee.session_id(), "/trustee/register"))
+        let response: WrappedResponse = client.post(&format!("{}/{}/trustee/register", api_base_addr, session_id))
             .json(&msg).send().await?
             .json().await?;
         if !response.status {
@@ -380,7 +384,7 @@ impl Trustee {
 
         // 2. Commitment
         let msg = trustee.gen_commitment();
-        let response: WrappedResponse = client.post(&net::address(trustee.session_id(), "/keygen/commitment"))
+        let response: WrappedResponse = client.post(&format!("{}/{}/keygen/commitment", api_base_addr, session_id))
             .json(&msg).send().await?
             .json().await?;
         if !response.status {
@@ -403,7 +407,7 @@ impl Trustee {
 
         // 4. Sign public key
         let msg = trustee.sign(TrusteeMessage::KeygenSign { pubkey: party.pubkey() });
-        let response: WrappedResponse = client.post(&net::address(trustee.session_id(), "/keygen/sign"))
+        let response: WrappedResponse = client.post(&format!("{}/{}/keygen/sign", api_base_addr, session_id))
             .json(&msg).send().await?
             .json().await?;
         if !response.status {
@@ -416,6 +420,7 @@ impl Trustee {
         println!("Trustee {} done: {}", index, party.pubkey().as_base64());
 
         let info = InternalInfo {
+            api_base_addr,
             address: trustee.trustee_info[&trustee.id].address.clone(),
             index,
             id: trustee.id,
@@ -470,7 +475,7 @@ impl Trustee {
             let votes = self.received_votes.lock().unwrap();
             println!("Votes received: {}", votes.len());
             for vote in votes.iter() {
-                let response: WrappedResponse = self.info.client.post(&net::address(&self.info.session_id, "/tally/vote"))
+                let response: WrappedResponse = self.info.client.post(&format!("{}/{}/tally/vote", &self.info.api_base_addr, &self.info.session_id))
                     .json(&vote).send().await?
                     .json().await?;
                 if !response.status {
@@ -571,7 +576,7 @@ impl Trustee {
         };
 
         // Post to WBB
-        let response: WrappedResponse = info.client.post(&net::address(&info.session_id, "/cast/commit"))
+        let response: WrappedResponse = info.client.post(&format!("{}/{}/cast/commit", &info.api_base_addr, &info.session_id))
             .json(&msg).send().await?
             .json().await?;
 

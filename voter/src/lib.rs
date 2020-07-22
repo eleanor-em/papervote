@@ -10,10 +10,9 @@ use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
-use crate::common::vote::{VoterMessage, VoterId, Vote, Ballot};
-use crate::common::net::{WrappedResponse, Response};
-use crate::common::commit::PedersenCtx;
-use crate::common::net;
+use common::vote::{VoterMessage, VoterId, Vote, Ballot};
+use common::net::{WrappedResponse, Response};
+use common::commit::PedersenCtx;
 
 #[derive(Debug)]
 pub enum VoterError {
@@ -90,7 +89,7 @@ impl Voter {
         self.voter_id.as_str()
     }
 
-    pub async fn post_init_commit(&self) -> Result<(), VoterError> {
+    pub async fn post_init_commit(&self, api_base_addr: &str) -> Result<(), VoterError> {
         let msg = VoterMessage::InitialCommit {
             voter_id: self.voter_id.clone(),
             c_a: self.commit_ctx.commit(&self.a.into(), &self.r_a.into()),
@@ -98,7 +97,7 @@ impl Voter {
         };
 
         let client = reqwest::Client::new();
-        let response: WrappedResponse = client.post(&net::address(&self.session_id, "/cast/ident"))
+        let response: WrappedResponse = client.post(&format!("{}/{}/cast/ident", api_base_addr, self.session_id))
             .json(&msg).send().await?
             .json().await?;
         if !response.status {
@@ -118,12 +117,12 @@ impl Voter {
         Ok(())
     }
 
-    pub async fn check_ec_commit(&mut self) -> Result<(), VoterError> {
+    pub async fn check_ec_commit(&mut self, api_base_addr: &str) -> Result<(), VoterError> {
         let client = reqwest::Client::new();
         time::delay_for(Duration::from_millis(1000)).await;
 
-        let path = format!("/cast/commit/{}", self.voter_id.to_string());
-        let response: WrappedResponse = client.get(&net::address(&self.session_id, &path))
+        let path = format!("{}/{}/cast/commit/{}", api_base_addr, self.session_id, self.voter_id.to_string());
+        let response: WrappedResponse = client.get(&path)
             .send().await?
             .json().await?;
 
