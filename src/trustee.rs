@@ -7,24 +7,22 @@ use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext, CurveElem};
 use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty, KeygenCommitment};
 use cryptid::AsBase64;
 use reqwest::Client;
-use serde::{Serialize, Deserialize};
 use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
 use crate::common::sign;
-use crate::common::sign::{SigningPubKey, SignedMessage, SigningKeypair};
-use crate::wbb::api::{Response, WrappedResponse, address};
+use crate::common::sign::{SignedMessage, SigningKeypair};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::voter::{VoterMessage, Ballot, VoterId, VoterError};
 use cryptid::zkp::PrfKnowDlog;
 use std::sync::{Arc, Mutex};
 use ring::signature::KeyPair;
-use crate::voter::vote::{Vote, Candidate};
 use futures::future::AbortHandle;
-use crate::wbb::api;
+use crate::common::net;
+use crate::common::net::{TrusteeMessage, TrusteeInfo, Response, WrappedResponse};
+use crate::common::vote::{VoterMessage, Candidate, VoterId, Ballot, Vote};
 
 #[derive(Debug)]
 pub enum TrusteeError {
@@ -33,7 +31,7 @@ pub enum TrusteeError {
     Io(std::io::Error),
     Serde(serde_json::Error),
     Net(reqwest::Error),
-    Voter(VoterError),
+    Decode,
     InvalidSignature,
     InvalidResponse,
     MissingRegistration,
@@ -72,65 +70,7 @@ impl From<reqwest::Error> for TrusteeError {
     }
 }
 
-impl From<VoterError> for TrusteeError {
-    fn from(e: VoterError) -> Self {
-        Self::Voter(e)
-    }
-}
-
 impl Error for TrusteeError {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum TrusteeMessage {
-    Info {
-        info: TrusteeInfo,
-    },
-    KeygenCommit {
-        commitment: KeygenCommitment,
-    },
-    KeygenShare {
-        share: Scalar,
-    },
-    KeygenSign {
-        pubkey: PublicKey,
-    },
-    EcCommit {
-        voter_id: VoterId,
-        enc_mac: Ciphertext,
-        enc_vote: Ciphertext,
-    },
-    EcVote {
-        vote: String,
-        enc_vote: Ciphertext,
-        prf_enc_vote: Scalar,
-        enc_id: Ciphertext,
-        enc_a: Ciphertext,
-        enc_b: Ciphertext,
-        enc_r_a: Ciphertext,
-        enc_r_b: Ciphertext,
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct TrusteeInfo {
-    pub id: Uuid,
-    pub pubkey: SigningPubKey,
-    pub index: usize,
-    pub address: String,
-}
-
-impl TrusteeInfo {
-    pub fn into_signed_msg(self, signature: String) -> Result<SignedMessage, base64::DecodeError> {
-        let sender_id = self.id.clone();
-        let signature = base64::decode(signature)?;
-
-        Ok(SignedMessage {
-            inner: TrusteeMessage::Info { info: self },
-            signature,
-            sender_id,
-        })
-    }
-}
 
 pub struct GeneratingTrustee {
     session_id: Uuid,
@@ -301,7 +241,7 @@ impl GeneratingTrustee {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&address(&self.session_id, "/trustee/all"))
+            let res: WrappedResponse = client.get(&net::address(&self.session_id, "/trustee/all"))
                 .send().await?
                 .json().await?;
 
@@ -333,7 +273,7 @@ impl GeneratingTrustee {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&address(&self.session_id, "/keygen/commitment/all"))
+            let res: WrappedResponse = client.get(&net::address(&self.session_id, "/keygen/commitment/all"))
                 .send().await?
                 .json().await?;
 
@@ -367,7 +307,7 @@ impl GeneratingTrustee {
         loop {
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&address(&self.session_id, "/keygen/sign/all"))
+            let res: WrappedResponse = client.get(&net::address(&self.session_id, "/keygen/sign/all"))
                 .send().await?
                 .json().await?;
 
@@ -429,7 +369,7 @@ impl Trustee {
 
         // 1. Registration
         let msg = trustee.gen_registration();
-        let response: WrappedResponse = client.post(&address(trustee.session_id(), "/trustee/register"))
+        let response: WrappedResponse = client.post(&net::address(trustee.session_id(), "/trustee/register"))
             .json(&msg).send().await?
             .json().await?;
         if !response.status {
@@ -440,7 +380,7 @@ impl Trustee {
 
         // 2. Commitment
         let msg = trustee.gen_commitment();
-        let response: WrappedResponse = client.post(&address(trustee.session_id(), "/keygen/commitment"))
+        let response: WrappedResponse = client.post(&net::address(trustee.session_id(), "/keygen/commitment"))
             .json(&msg).send().await?
             .json().await?;
         if !response.status {
@@ -463,7 +403,7 @@ impl Trustee {
 
         // 4. Sign public key
         let msg = trustee.sign(TrusteeMessage::KeygenSign { pubkey: party.pubkey() });
-        let response: WrappedResponse = client.post(&address(trustee.session_id(), "/keygen/sign"))
+        let response: WrappedResponse = client.post(&net::address(trustee.session_id(), "/keygen/sign"))
             .json(&msg).send().await?
             .json().await?;
         if !response.status {
@@ -530,7 +470,7 @@ impl Trustee {
             let votes = self.received_votes.lock().unwrap();
             println!("Votes received: {}", votes.len());
             for vote in votes.iter() {
-                let response: WrappedResponse = self.info.client.post(&api::address(&self.info.session_id, "/tally/vote"))
+                let response: WrappedResponse = self.info.client.post(&net::address(&self.info.session_id, "/tally/vote"))
                     .json(&vote).send().await?
                     .json().await?;
                 if !response.status {
@@ -631,7 +571,7 @@ impl Trustee {
         };
 
         // Post to WBB
-        let response: WrappedResponse = info.client.post(&address(&info.session_id, "/cast/commit"))
+        let response: WrappedResponse = info.client.post(&net::address(&info.session_id, "/cast/commit"))
             .json(&msg).send().await?
             .json().await?;
 
@@ -664,7 +604,7 @@ impl Trustee {
             return Ok(());
         }
 
-        let encoded_voter_id = ballot.p2_id.try_as_curve_elem()?;
+        let encoded_voter_id = ballot.p2_id.try_as_curve_elem().ok_or(TrusteeError::Decode)?;
         if info.pubkey.encrypt(&info.ctx, &encoded_voter_id, &ballot.p2_prf_enc) != ballot.p2_enc_id {
             eprintln!("#{}: failed to verify proof-of-encryption for voter ID", info.index);
             return Ok(());
@@ -694,7 +634,7 @@ impl Trustee {
 
         let vote = ballot.p1_vote;
         let vote_value = u128::from_str_radix(&vote, 10)
-            .map_err(|_| TrusteeError::Voter(VoterError::Decode))?;
+            .map_err(|_| TrusteeError::Decode)?;
         let vote_value: Scalar = vote_value.into();
         let prf_enc_vote = info.ctx.random_power()?;
         let enc_vote = info.pubkey.encrypt(&info.ctx, &CurveElem::try_encode(vote_value)?, &prf_enc_vote);

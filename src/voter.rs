@@ -1,22 +1,19 @@
-pub mod vote;
-use std::convert::TryInto;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use cryptid::{Scalar, CryptoError};
 use cryptid::elgamal::{CryptoContext, Ciphertext, PublicKey, CurveElem};
 use cryptid::zkp::PrfKnowDlog;
-use serde::{Serialize, Deserialize};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
-use crate::common::commit::{PedersenCtx, Commitment};
-use crate::voter::vote::Vote;
-use crate::wbb::api::{WrappedResponse, Response};
-use crate::wbb::api;
+use crate::common::vote::{VoterMessage, VoterId, Vote, Ballot};
+use crate::common::net::{WrappedResponse, Response};
+use crate::common::commit::PedersenCtx;
+use crate::common::net;
 
 #[derive(Debug)]
 pub enum VoterError {
@@ -56,55 +53,6 @@ impl Display for VoterError {
 
 impl Error for VoterError {}
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct VoterId(String);
-
-impl ToString for VoterId {
-    fn to_string(&self) -> String {
-        self.0.clone()
-    }
-}
-
-impl VoterId {
-    pub fn try_as_curve_elem(&self) -> Result<CurveElem, VoterError> {
-        CurveElem::try_encode(self.0.as_bytes().to_vec().try_into().map_err(|_| VoterError::Encode)?)
-            .map_err(|_| VoterError::Encode)
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct Ballot {
-    pub p1_vote: String,
-    pub p1_enc_a: Ciphertext,
-    pub p1_enc_b: Ciphertext,
-    pub p1_enc_r_a: Ciphertext,
-    pub p1_enc_r_b: Ciphertext,
-    pub p1_prf_a: PrfKnowDlog,
-    pub p1_prf_b: PrfKnowDlog,
-    pub p1_prf_r_a: PrfKnowDlog,
-    pub p1_prf_r_b: PrfKnowDlog,
-    pub p2_id: VoterId,
-    pub p2_enc_id: Ciphertext,
-    pub p2_prf_enc: Scalar,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub enum VoterMessage {
-    InitialCommit {
-        voter_id: VoterId,
-        c_a: Commitment,
-        c_b: Commitment,
-    },
-    EcCommit {
-        voter_id: VoterId,
-        enc_mac: Ciphertext,
-        enc_vote: Ciphertext,
-        prf_know_mac: PrfKnowDlog,
-        prf_know_vote: PrfKnowDlog,
-    },
-    Ballot(Ballot),
-}
-
 pub struct Voter {
     session_id: Uuid,
     pubkey: PublicKey,
@@ -129,7 +77,7 @@ impl Voter {
             pubkey,
             ctx: ctx.clone(),
             commit_ctx,
-            voter_id: VoterId(voter_id),
+            voter_id: VoterId::new(voter_id),
             a: ctx.random_elem()?,
             r_a: ctx.random_elem()?,
             b: ctx.random_elem()?,
@@ -139,7 +87,7 @@ impl Voter {
     }
 
     pub fn id(&self) -> &str {
-        &self.voter_id.0
+        self.voter_id.as_str()
     }
 
     pub async fn post_init_commit(&self) -> Result<(), VoterError> {
@@ -150,7 +98,7 @@ impl Voter {
         };
 
         let client = reqwest::Client::new();
-        let response: WrappedResponse = client.post(&api::address(&self.session_id, "/cast/ident"))
+        let response: WrappedResponse = client.post(&net::address(&self.session_id, "/cast/ident"))
             .json(&msg).send().await?
             .json().await?;
         if !response.status {
@@ -175,7 +123,7 @@ impl Voter {
         time::delay_for(Duration::from_millis(1000)).await;
 
         let path = format!("/cast/commit/{}", self.voter_id.to_string());
-        let response: WrappedResponse = client.get(&api::address(&self.session_id, &path))
+        let response: WrappedResponse = client.get(&net::address(&self.session_id, &path))
             .send().await?
             .json().await?;
 
@@ -191,7 +139,7 @@ impl Voter {
         let (b, prf_b) = self.encrypt(&self.b.clone())?;
         let (r_a, prf_r_a) = self.encrypt(&self.r_a.clone())?;
         let (r_b, prf_r_b) = self.encrypt(&self.r_b.clone())?;
-        let (id, prf_id) = self.encrypt(&self.voter_id.try_as_curve_elem()?)?;
+        let (id, prf_id) = self.encrypt(&self.voter_id.try_as_curve_elem().ok_or(VoterError::Decode)?)?;
 
         let g = self.ctx.generator();
 

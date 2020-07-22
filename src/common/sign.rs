@@ -9,8 +9,8 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::sync::{Arc, Mutex};
 use ring::rand::SystemRandom;
 use std::ops::Deref;
-use crate::trustee::TrusteeMessage;
 use std::convert::TryFrom;
+use crate::common::net::TrusteeMessage;
 
 pub type SigningKeypair = Ed25519KeyPair;
 

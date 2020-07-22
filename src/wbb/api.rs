@@ -4,20 +4,12 @@ use std::sync::Arc;
 use futures::{executor, TryFutureExt};
 use rocket::State;
 use rocket_contrib::json::Json;
-use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
-use crate::APP_NAME;
-use crate::common::config::PapervoteConfig;
-use crate::common::sign::{SignedMessage, SigningPubKey};
-use crate::trustee::TrusteeMessage;
-use crate::voter::VoterMessage;
+use crate::common::sign::SignedMessage;
 use crate::wbb::db::{DbClient, DbError};
-
-pub fn address(session_id: &Uuid, path: &str) -> String {
-    let cfg: PapervoteConfig = confy::load(APP_NAME).unwrap();
-    format!("{}{}{}", cfg.api_url, session_id, path)
-}
+use crate::common::net::{Response, WrappedResponse, TrusteeMessage, NewSessionRequest};
+use crate::common::vote::VoterMessage;
 
 pub struct Api {
     db: Arc<DbClient>,
@@ -50,31 +42,6 @@ impl Api {
             .manage(self)
             .launch();
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WrappedResponse {
-    pub status: bool,
-    pub msg: Response,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Response {
-    PublicKey(SigningPubKey),
-    ResultSet(Vec<SignedMessage>),
-    Outcome(bool),
-    Ok,
-    SessionExists,
-    NotReady,
-    UnknownId,
-    TrusteeMissing,
-    InvalidSession,
-    InvalidData,
-    InvalidRequest,
-    InvalidSignature,
-    FailedInsertion,
-    ParseError,
-    MiscError,
 }
 
 fn failure(msg: Response) -> Json<WrappedResponse> {
@@ -127,12 +94,6 @@ fn register_trustee_inner(state: State<'_, Api>, session: String, msg: Json<Sign
     } else {
         Err(failure(Response::InvalidRequest))
     }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct NewSessionRequest {
-    pub min_trustees: usize,
-    pub trustee_count: usize,
 }
 
 #[rocket::post("/api/<session>/new", format = "json", data = "<req>")]

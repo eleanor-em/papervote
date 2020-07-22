@@ -14,8 +14,9 @@ use papervote::common::commit::PedersenCtx;
 use papervote::common::config::PapervoteConfig;
 use papervote::trustee::Trustee;
 use papervote::voter::Voter;
-use papervote::voter::vote::{Vote, Candidate};
-use papervote::wbb::api::{Api, NewSessionRequest, WrappedResponse};
+use papervote::wbb::api::Api;
+use papervote::common::vote::{Candidate, Vote};
+use papervote::common::net::{WrappedResponse, NewSessionRequest};
 
 #[tokio::main]
 async fn main() -> Result<()> {

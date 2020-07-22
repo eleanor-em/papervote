@@ -12,8 +12,8 @@ use crate::APP_NAME;
 use crate::common::commit::Commitment;
 use crate::common::config::PapervoteConfig;
 use crate::common::sign::{SignedMessage, SigningPubKey};
-use crate::trustee::{TrusteeInfo, TrusteeMessage};
-use crate::voter::VoterId;
+use crate::common::net::{TrusteeMessage, TrusteeInfo};
+use crate::common::vote::VoterId;
 
 #[derive(Debug)]
 pub enum DbError {

@@ -1,3 +1,8 @@
+use cryptid::zkp::PrfKnowDlog;
+use cryptid::elgamal::{Ciphertext, CurveElem};
+use cryptid::Scalar;
+use crate::common::commit::Commitment;
+use std::convert::TryInto;
 use std::collections::HashMap;
 
 use serde::{Serialize, Deserialize};
@@ -80,4 +85,59 @@ impl ToString for Vote {
         }
         result.into_iter().collect()
     }
+}
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct VoterId(String);
+
+impl ToString for VoterId {
+    fn to_string(&self) -> String {
+        self.0.clone()
+    }
+}
+
+impl VoterId {
+    pub fn new(src: String) -> Self {
+        Self(src)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn try_as_curve_elem(&self) -> Option<CurveElem> {
+        CurveElem::try_encode(self.0.as_bytes().to_vec().try_into().ok()?).ok()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct Ballot {
+    pub p1_vote: String,
+    pub p1_enc_a: Ciphertext,
+    pub p1_enc_b: Ciphertext,
+    pub p1_enc_r_a: Ciphertext,
+    pub p1_enc_r_b: Ciphertext,
+    pub p1_prf_a: PrfKnowDlog,
+    pub p1_prf_b: PrfKnowDlog,
+    pub p1_prf_r_a: PrfKnowDlog,
+    pub p1_prf_r_b: PrfKnowDlog,
+    pub p2_id: VoterId,
+    pub p2_enc_id: Ciphertext,
+    pub p2_prf_enc: Scalar,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub enum VoterMessage {
+    InitialCommit {
+        voter_id: VoterId,
+        c_a: Commitment,
+        c_b: Commitment,
+    },
+    EcCommit {
+        voter_id: VoterId,
+        enc_mac: Ciphertext,
+        enc_vote: Ciphertext,
+        prf_know_mac: PrfKnowDlog,
+        prf_know_vote: PrfKnowDlog,
+    },
+    Ballot(Ballot),
 }
