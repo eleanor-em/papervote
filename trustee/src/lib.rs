@@ -88,7 +88,7 @@ impl GeneratingTrustee {
         let id = Uuid::new_v4();
 
         // Generate a signature keypair
-        let signing_keypair = sign::new_keypair(ctx.rng())?;
+        let signing_keypair = sign::new_keypair(&ctx);
 
         // Create identification for this trustee
         let port = 14000 + index;
@@ -103,7 +103,49 @@ impl GeneratingTrustee {
 
         let generator = ThresholdGenerator::new(&mut ctx, index, k, n)?;
 
-        Ok(Self {
+        Ok(Self {    // Setup
+    let cfg: PapervoteConfig = confy::load(APP_NAME)?;
+    let session_id = Uuid::new_v4();
+    let ctx = CryptoContext::new()?;
+    let commit_ctx = PedersenCtx::new(session_id.as_bytes(), ctx.clone(), 1);
+
+    let api = Api::new().await?;
+    std::thread::spawn(move || api.start());
+
+    open_session(&cfg, session_id.clone()).await?;
+
+    let candidates = get_candidates();
+    let mut trustees = create_trustees(&cfg, ctx.clone(), session_id.clone()).await?;
+    let pubkey = trustees[0].pubkey();
+
+    let ec = &mut trustees[0];
+    ec.receive_voter_data(candidates.clone());
+    time::delay_for(Duration::from_millis(200)).await;
+
+    let candidates: Vec<_> = candidates.values().collect();
+
+    println!("Sending vote data...");
+    let mut handles = Vec::new();
+    const N: usize = 50;
+    for i in 0..N {
+        let addr = ec.address();
+        let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidates)?;
+        handles.push(tokio::spawn(run_voter(voter, cfg.api_url.clone(), addr)));
+
+        // give the threads a slight break to push through
+        if i > 0 && i % 500 == 0 {
+            time::delay_for(Duration::from_millis(1000)).await;
+        }
+    }
+
+    futures::future::join_all(handles).await;
+
+    println!("Votes closing soon...");
+    ec.close_votes(N).await?;
+    time::delay_for(Duration::from_millis(500)).await;
+
+    Ok(())
+
             api_base_addr,
             session_id,
             id,
@@ -559,9 +601,9 @@ impl Trustee {
         }
 
         // Re-randomise encryptions
-        let r = info.ctx.random_power()?;
+        let r = info.ctx.random_power();
         let enc_mac = info.pubkey.rerand(&info.ctx, &enc_mac, &r);
-        let r = info.ctx.random_power()?;
+        let r = info.ctx.random_power();
         let enc_vote = info.pubkey.rerand(&info.ctx, &enc_vote, &r);
 
         // Construct message
@@ -626,22 +668,22 @@ impl Trustee {
         }
 
         // Re-randomise encryptions
-        let r = info.ctx.random_power()?;
+        let r = info.ctx.random_power();
         let enc_id = info.pubkey.rerand(&info.ctx, &ballot.p2_enc_id, &r);
-        let r = info.ctx.random_power()?;
+        let r = info.ctx.random_power();
         let enc_a = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_a, &r);
-        let r = info.ctx.random_power()?;
+        let r = info.ctx.random_power();
         let enc_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_b, &r);
-        let r = info.ctx.random_power()?;
+        let r = info.ctx.random_power();
         let enc_r_a = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_a, &r);
-        let r = info.ctx.random_power()?;
+        let r = info.ctx.random_power();
         let enc_r_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_b, &r);
 
         let vote = ballot.p1_vote;
         let vote_value = u128::from_str_radix(&vote, 10)
             .map_err(|_| TrusteeError::Decode)?;
         let vote_value: Scalar = vote_value.into();
-        let prf_enc_vote = info.ctx.random_power()?;
+        let prf_enc_vote = info.ctx.random_power();
         let enc_vote = info.pubkey.encrypt(&info.ctx, &CurveElem::try_encode(vote_value)?, &prf_enc_vote);
 
         // Construct message

@@ -9,11 +9,11 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 use common::APP_NAME;
-use common::commit::Commitment;
 use common::config::PapervoteConfig;
 use common::sign::{SignedMessage, SigningPubKey};
 use common::net::{TrusteeMessage, TrusteeInfo};
 use common::vote::VoterId;
+use cryptid::commit::Commitment;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -228,7 +228,7 @@ impl DbClient {
         let result = self.client.execute("
             INSERT INTO wbb_idents(session, voter_id, c_a, c_b)
             VALUES ($1, $2, $3, $4);
-        ", &[session, &voter_id.to_string(), &c_a.as_base64(), &c_b.as_base64()]).await?;
+        ", &[session, &voter_id.to_string(), &c_a.to_string(), &c_b.to_string()]).await?;
 
         if result > 0 {
             Ok(())

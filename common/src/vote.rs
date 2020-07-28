@@ -1,11 +1,11 @@
 use cryptid::zkp::PrfKnowDlog;
 use cryptid::elgamal::{Ciphertext, CurveElem};
 use cryptid::Scalar;
-use crate::commit::Commitment;
 use std::convert::TryInto;
 use std::collections::HashMap;
 
 use serde::{Serialize, Deserialize};
+use cryptid::commit::Commitment;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct Candidate {

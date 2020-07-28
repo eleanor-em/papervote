@@ -7,10 +7,11 @@ use std::fmt;
 use cryptid::CryptoError;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::sync::{Arc, Mutex};
-use ring::rand::SystemRandom;
 use std::ops::Deref;
 use std::convert::TryFrom;
 use crate::net::TrusteeMessage;
+use cryptid::elgamal::CryptoContext;
+use rand::RngCore;
 
 pub type SigningKeypair = Ed25519KeyPair;
 
@@ -35,12 +36,13 @@ impl SignedMessage {
     }
 }
 
-pub fn new_keypair(rng: Arc<Mutex<SystemRandom>>) -> Result<SigningKeypair, CryptoError> {
-    let rng = rng.lock().unwrap();
-    let bytes = signature::Ed25519KeyPair::generate_pkcs8(rng.deref())
-        .map_err(|e| CryptoError::Unspecified(e))?;
-    signature::Ed25519KeyPair::from_pkcs8(bytes.as_ref())
-        .map_err(|e| CryptoError::KeyRejected(e))
+pub fn new_keypair(ctx: &CryptoContext) -> SigningKeypair {
+    let rng = ctx.rng();
+    let mut rng = rng.lock().unwrap();
+    let mut seed = [0; 32];
+    rng.fill_bytes(&mut seed);
+    // Below call cannot fail
+    Ed25519KeyPair::from_seed_unchecked(&seed).unwrap()
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]

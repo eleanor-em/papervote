@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use common::vote::{VoterMessage, VoterId, Vote, Ballot};
 use common::net::{WrappedResponse, Response};
-use common::commit::PedersenCtx;
+use cryptid::commit::PedersenCtx;
 
 #[derive(Debug)]
 pub enum VoterError {
@@ -77,10 +77,10 @@ impl Voter {
             ctx: ctx.clone(),
             commit_ctx,
             voter_id: VoterId::new(voter_id),
-            a: ctx.random_elem()?,
-            r_a: ctx.random_elem()?,
-            b: ctx.random_elem()?,
-            r_b: ctx.random_elem()?,
+            a: ctx.random_elem(),
+            r_a: ctx.random_elem(),
+            b: ctx.random_elem(),
+            r_b: ctx.random_elem(),
             vote: None
         })
     }
@@ -92,8 +92,8 @@ impl Voter {
     pub async fn post_init_commit(&self, api_base_addr: &str) -> Result<(), VoterError> {
         let msg = VoterMessage::InitialCommit {
             voter_id: self.voter_id.clone(),
-            c_a: self.commit_ctx.commit(&self.a.into(), &self.r_a.into()),
-            c_b: self.commit_ctx.commit(&self.b.into(), &self.r_b.into()),
+            c_a: self.commit_ctx.commit_one(&self.a.into(), &self.r_a.into()),
+            c_b: self.commit_ctx.commit_one(&self.b.into(), &self.r_b.into()),
         };
 
         let client = reqwest::Client::new();
@@ -183,7 +183,7 @@ impl Voter {
     }
 
     fn encrypt(&mut self, m: &CurveElem) -> Result<(Ciphertext, Scalar), VoterError> {
-        let r = self.ctx.random_power()?;
+        let r = self.ctx.random_power();
         let ct = self.pubkey.encrypt(&self.ctx, m, &r);
         Ok((ct, r))
     }
@@ -193,8 +193,8 @@ impl Voter {
             Err(VoterError::VoteMissing)?;
         }
 
-        let r1 = self.ctx.random_power()?;
-        let r2 = self.ctx.random_power()?;
+        let r1 = self.ctx.random_power();
+        let r2 = self.ctx.random_power();
 
         let mac = &self.ctx.g_to(&self.get_mac().ok_or(VoterError::VoteMissing)?);
         let vote = &self.ctx.g_to(&self.get_encoded_vote().ok_or(VoterError::VoteMissing)?);

@@ -10,21 +10,21 @@ use tokio::time;
 use uuid::Uuid;
 
 use common::APP_NAME;
-use common::commit::PedersenCtx;
 use common::config::PapervoteConfig;
 use common::vote::{Candidate, Vote};
 use common::net::{WrappedResponse, NewSessionRequest};
 use trustee::Trustee;
 use voter::Voter;
 use wbb::api::Api;
+use cryptid::commit::PedersenCtx;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Setup
     let cfg: PapervoteConfig = confy::load(APP_NAME)?;
     let session_id = Uuid::new_v4();
-    let ctx = CryptoContext::new();
-    let commit_ctx = PedersenCtx::new(&session_id, ctx.clone());
+    let ctx = CryptoContext::new()?;
+    let commit_ctx = PedersenCtx::new(session_id.as_bytes(), ctx.clone(), 1);
 
     let api = Api::new().await?;
     std::thread::spawn(move || api.start());
