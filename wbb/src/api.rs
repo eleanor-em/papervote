@@ -38,6 +38,9 @@ impl Api {
                 post_ec_commit,
                 find_ec_commit,
                 post_ec_vote,
+                post_ec_vote_mix,
+                get_ec_votes,
+                get_ec_mix_votes,
             ])
             .manage(self)
             .launch();
@@ -324,4 +327,74 @@ fn post_ec_vote_inner(state: State<'_, Api>, session: String, msg: Json<SignedMe
         })?;
 
     Ok(success(Response::Ok))
+}
+
+#[rocket::get("/api/<session>/tally/vote")]
+fn get_ec_votes(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_ec_votes_inner(state, session))
+}
+fn get_ec_votes_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.get_all_enc_votes(&session))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::Ciphertexts(results)))
+}
+
+#[rocket::post("/api/<session>/tally/vote_mix", format = "json", data = "<msg>")]
+fn post_ec_vote_mix(state: State<'_, Api>, session: String, msg: Json<SignedMessage>) -> Json<WrappedResponse> {
+    respond(post_ec_vote_mix_inner(state, session, msg))
+}
+fn post_ec_vote_mix_inner(state: State<'_, Api>, session: String, msg: Json<SignedMessage>) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    let (mix_index, enc_votes, enc_voter_ids, enc_as, enc_bs, enc_r_as, enc_r_bs, proof) = match &msg.inner {
+        TrusteeMessage::EcVoteMix {
+            mix_index, enc_votes, enc_voter_ids, enc_as, enc_bs, enc_r_as, enc_r_bs, proof
+        } => {
+            Ok((mix_index, enc_votes, enc_voter_ids, enc_as, enc_bs, enc_r_as, enc_r_bs, proof))
+        },
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    let db = state.db.clone();
+
+    // Verify the signature to ensure this was sent by an EC rep
+    let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
+        .map_err(|_| failure(Response::InvalidSignature))?;
+    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+        return Err(failure(Response::InvalidSignature));
+    }
+
+    executor::block_on(db.insert_ec_vote_mix(&session, *mix_index, &enc_votes, &enc_voter_ids, &enc_as, &enc_bs, &enc_r_as, &enc_r_bs, &proof, &msg.sender_id, &msg.signature))
+        .map_err(|e| {
+            match e {
+                DbError::InsertAlreadyExists => failure(Response::FailedInsertion),
+                _ => {
+                    eprintln!("unexpected error: {}", e);
+                    failure(Response::MiscError)
+                }
+            }
+        })?;
+
+    Ok(success(Response::Ok))
+}
+
+#[rocket::get("/api/<session>/tally/vote_mix/<mix_index>")]
+fn get_ec_mix_votes(state: State<'_, Api>, session: String, mix_index: i16) -> Json<WrappedResponse> {
+    respond(get_ec_mix_votes_inner(state, session, mix_index))
+}
+fn get_ec_mix_votes_inner(state: State<'_, Api>, session: String, mix_index: i16) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.get_mix_votes(&session, mix_index))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::Ciphertexts(results)))
 }

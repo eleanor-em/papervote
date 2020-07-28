@@ -23,6 +23,8 @@ use ring::signature::KeyPair;
 use futures::future::AbortHandle;
 use common::net::{TrusteeMessage, TrusteeInfo, Response, WrappedResponse};
 use common::vote::{VoterMessage, Candidate, VoterId, Ballot, Vote};
+use cryptid::commit::PedersenCtx;
+use cryptid::shuffle::Shuffle;
 
 #[derive(Debug)]
 pub enum TrusteeError {
@@ -32,6 +34,7 @@ pub enum TrusteeError {
     Serde(serde_json::Error),
     Net(reqwest::Error),
     Decode,
+    Api,
     InvalidSignature,
     InvalidResponse,
     MissingRegistration,
@@ -103,49 +106,7 @@ impl GeneratingTrustee {
 
         let generator = ThresholdGenerator::new(&mut ctx, index, k, n)?;
 
-        Ok(Self {    // Setup
-    let cfg: PapervoteConfig = confy::load(APP_NAME)?;
-    let session_id = Uuid::new_v4();
-    let ctx = CryptoContext::new()?;
-    let commit_ctx = PedersenCtx::new(session_id.as_bytes(), ctx.clone(), 1);
-
-    let api = Api::new().await?;
-    std::thread::spawn(move || api.start());
-
-    open_session(&cfg, session_id.clone()).await?;
-
-    let candidates = get_candidates();
-    let mut trustees = create_trustees(&cfg, ctx.clone(), session_id.clone()).await?;
-    let pubkey = trustees[0].pubkey();
-
-    let ec = &mut trustees[0];
-    ec.receive_voter_data(candidates.clone());
-    time::delay_for(Duration::from_millis(200)).await;
-
-    let candidates: Vec<_> = candidates.values().collect();
-
-    println!("Sending vote data...");
-    let mut handles = Vec::new();
-    const N: usize = 50;
-    for i in 0..N {
-        let addr = ec.address();
-        let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidates)?;
-        handles.push(tokio::spawn(run_voter(voter, cfg.api_url.clone(), addr)));
-
-        // give the threads a slight break to push through
-        if i > 0 && i % 500 == 0 {
-            time::delay_for(Duration::from_millis(1000)).await;
-        }
-    }
-
-    futures::future::join_all(handles).await;
-
-    println!("Votes closing soon...");
-    ec.close_votes(N).await?;
-    time::delay_for(Duration::from_millis(500)).await;
-
-    Ok(())
-
+        Ok(Self {
             api_base_addr,
             session_id,
             id,
@@ -484,6 +445,10 @@ impl Trustee {
         })
     }
 
+    pub fn index(&self) -> usize {
+        self.info.index
+    }
+
     pub fn log(&self) -> String {
         let hasher = self.log.clone();
         base64::encode(&hasher.finish_vec())
@@ -701,6 +666,85 @@ impl Trustee {
 
         // Add it to the store
         received_votes.lock().unwrap().push(msg);
+
+        Ok(())
+    }
+
+    pub async fn mix_votes(&self) -> Result<(), TrusteeError> {
+        // download votes
+        let client = reqwest::Client::new();
+        let response: WrappedResponse = if self.info.index == 1 {
+            // if index 1, get the raw votes
+            client.get(&format!("{}/{}/tally/vote", &self.info.api_base_addr, &self.info.session_id))
+                .send().await?
+                .json().await?
+        } else {
+            // otherwise, get the output of the previous mix
+            client.get(&format!("{}/{}/tally/vote_mix/{}", &self.info.api_base_addr, &self.info.session_id, self.info.index - 1))
+                .send().await?
+                .json().await?
+        };
+
+        if !response.status {
+            eprintln!("error getting votes: {:?}", response.msg);
+            return Err(TrusteeError::Api);
+        }
+
+        let result = match response.msg {
+            Response::Ciphertexts(cts) => cts,
+            _ => {
+                return Err(TrusteeError::InvalidResponse);
+            }
+        };
+
+        let mut ctx = self.info.ctx.clone();
+        let commit_ctx = PedersenCtx::new(self.info.session_id.as_bytes(), ctx.clone(), result.len() + 1);
+        let shuffle = Shuffle::new(ctx.clone(), result, &self.info.pubkey)?;
+        let proof = shuffle.gen_proof(&mut ctx, &commit_ctx, &self.info.pubkey)?;
+
+        let outputs = shuffle.outputs().to_vec();
+        let mut enc_votes = Vec::new();
+        let mut enc_voter_ids = Vec::new();
+        let mut enc_as = Vec::new();
+        let mut enc_bs = Vec::new();
+        let mut enc_r_as = Vec::new();
+        let mut enc_r_bs = Vec::new();
+
+        for mut cts in outputs.into_iter() {
+            enc_r_bs.push(cts.remove(5));
+            enc_r_as.push(cts.remove(4));
+            enc_bs.push(cts.remove(3));
+            enc_as.push(cts.remove(2));
+            enc_voter_ids.push(cts.remove(1));
+            enc_votes.push(cts.remove(0));
+        }
+
+        // send shuffle
+        let inner = TrusteeMessage::EcVoteMix {
+            mix_index: self.info.index as i16,
+            enc_votes,
+            enc_voter_ids,
+            enc_as,
+            enc_bs,
+            enc_r_as,
+            enc_r_bs,
+            proof,
+        };
+        let data = serde_json::to_string(&inner)?.as_bytes().to_vec();
+        let signature = self.info.signing_keypair.sign(&data).as_ref().to_vec();
+
+        let msg = SignedMessage {
+            inner,
+            signature,
+            sender_id: self.info.id.clone()
+        };
+        let res: WrappedResponse = client.post(&format!("{}/{}/tally/vote_mix", &self.info.api_base_addr, &self.info.session_id))
+            .json(&msg)
+            .send().await?
+            .json().await?;
+        if !res.status {
+            eprintln!("error getting votes: {:?}", res.msg);
+        }
 
         Ok(())
     }

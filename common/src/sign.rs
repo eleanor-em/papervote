@@ -6,8 +6,6 @@ use serde::export::Formatter;
 use std::fmt;
 use cryptid::CryptoError;
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use std::sync::{Arc, Mutex};
-use std::ops::Deref;
 use std::convert::TryFrom;
 use crate::net::TrusteeMessage;
 use cryptid::elgamal::CryptoContext;

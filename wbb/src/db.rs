@@ -1,4 +1,4 @@
-use std::convert::TryInto;
+use std::convert::{TryInto, TryFrom};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -14,6 +14,7 @@ use common::sign::{SignedMessage, SigningPubKey};
 use common::net::{TrusteeMessage, TrusteeInfo};
 use common::vote::VoterId;
 use cryptid::commit::Commitment;
+use cryptid::shuffle::ShuffleProof;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -144,6 +145,29 @@ impl DbClient {
                 signed_by       UUID NOT NULL,
                 signature       TEXT UNIQUE NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS wbb_votes_mix (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                mix_index       SMALLINT NOT NULL,
+                index           INTEGER NOT NULL,
+                enc_vote        TEXT UNIQUE NOT NULL,
+                enc_voter_id    TEXT UNIQUE NOT NULL,
+                enc_param_a     TEXT UNIQUE NOT NULL,
+                enc_param_b     TEXT UNIQUE NOT NULL,
+                enc_param_r_a   TEXT UNIQUE NOT NULL,
+                enc_param_r_b   TEXT UNIQUE NOT NULL,
+                CONSTRAINT      unique_wbb_votes_mix_session_index UNIQUE(session, mix_index, index)
+            );
+            CREATE TABLE IF NOT EXISTS wbb_votes_mix_proofs (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                mix_index       SMALLINT NOT NULL,
+                proof           TEXT NOT NULL,
+                signed_by       UUID NOT NULL,
+                signature       TEXT UNIQUE NOT NULL,
+                CONSTRAINT      unique_wbb_votes_mix_proofs_session_index UNIQUE(session, mix_index),
+                CONSTRAINT      unique_wbb_votes_mix_proofs_session_signer UNIQUE(session, signed_by)
+            );
         ").await?;
 
         Ok(())
@@ -224,7 +248,12 @@ impl DbClient {
         }
     }
 
-    pub async fn insert_ident(&self, session: &Uuid, voter_id: VoterId, c_a: &Commitment, c_b: &Commitment) -> Result<(), DbError> {
+    pub async fn insert_ident(&self,
+                              session: &Uuid,
+                              voter_id: VoterId,
+                              c_a: &Commitment,
+                              c_b: &Commitment
+    ) -> Result<(), DbError> {
         let result = self.client.execute("
             INSERT INTO wbb_idents(session, voter_id, c_a, c_b)
             VALUES ($1, $2, $3, $4);
@@ -237,7 +266,14 @@ impl DbClient {
         }
     }
 
-    pub async fn insert_ec_commit(&self, session: &Uuid, voter_id: VoterId, enc_mac: &Ciphertext, enc_vote: &Ciphertext, signed_by: &Uuid, signature: &[u8]) -> Result<(), DbError> {
+    pub async fn insert_ec_commit(&self,
+                                  session: &Uuid,
+                                  voter_id: VoterId,
+                                  enc_mac: &Ciphertext,
+                                  enc_vote: &Ciphertext,
+                                  signed_by: &Uuid,
+                                  signature: &[u8]
+    ) -> Result<(), DbError> {
         let result = self.client.execute("
             INSERT INTO wbb_commits(session, voter_id, enc_mac, enc_vote, signed_by, signature)
             VALUES ($1, $2, $3, $4, $5, $6);
@@ -267,6 +303,42 @@ impl DbClient {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
         ", &[session, &vote, &enc_vote.to_string(), &prf_enc_vote.as_base64(), &enc_id.to_string(), &enc_a.to_string(), &enc_b.to_string(),
             &enc_r_a.to_string(), &enc_r_b.to_string(), signed_by, &base64::encode(signature)]).await?;
+
+        if result > 0 {
+            Ok(())
+        } else {
+            Err(DbError::InsertAlreadyExists)
+        }
+    }
+
+    pub async fn insert_ec_vote_mix(&self,
+                                    session: &Uuid,
+                                    mix_index: i16,
+                                    enc_votes: &[Ciphertext],
+                                    enc_voter_ids: &[Ciphertext],
+                                    enc_as: &[Ciphertext],
+                                    enc_bs: &[Ciphertext],
+                                    enc_r_as: &[Ciphertext],
+                                    enc_r_bs: &[Ciphertext],
+                                    proof: &ShuffleProof,
+                                    signed_by: &Uuid,
+                                    signature: &[u8]
+    ) -> Result<(), DbError> {
+        for i in 0..enc_votes.len() {
+            if self.client.execute("
+                INSERT INTO wbb_votes_mix(session, mix_index, index, enc_vote, enc_voter_id, enc_param_a, enc_param_b, enc_param_r_a, enc_param_r_b)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ", &[session, &mix_index, &(i as i32), &enc_votes[i].to_string(),
+                         &enc_voter_ids[i].to_string(), &enc_as[i].to_string(),
+                         &enc_bs[i].to_string(), &enc_r_as[i].to_string(),
+                         &enc_r_bs[i].to_string()]).await? == 0 {
+                return Err(DbError::InsertAlreadyExists);
+            }
+        }
+        let result = self.client.execute("
+            INSERT INTO wbb_votes_mix_proofs(session, mix_index, proof, signed_by, signature)
+            VALUES ($1, $2, $3, $4, $5)
+        ", &[session, &mix_index, &proof.to_string(), signed_by, &base64::encode(signature)]).await?;
 
         if result > 0 {
             Ok(())
@@ -411,6 +483,62 @@ impl DbClient {
         Ok(result)
     }
 
+    pub async fn get_all_enc_votes(&self, session: &Uuid) -> Result<Vec<Vec<Ciphertext>>, DbError> {
+        let rows = self.client.query("
+            SELECT enc_vote, enc_voter_id, enc_param_a, enc_param_b, enc_param_r_a, enc_param_r_b
+            FROM wbb_votes
+            WHERE session=$1
+            ORDER BY id
+        ", &[session]).await?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let s: String = row.get(0);
+            let vote = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("vote"))?;
+            let s: String = row.get(1);
+            let id = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("voter id"))?;
+            let s: String = row.get(2);
+            let a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("a"))?;
+            let s: String = row.get(3);
+            let b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("b"))?;
+            let s: String = row.get(4);
+            let r_a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_a"))?;
+            let s: String = row.get(5);
+            let r_b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_b"))?;
+            result.push(vec![vote, id, a, b, r_a, r_b]);
+        }
+
+        Ok(result)
+    }
+
+    pub async fn get_mix_votes(&self, session: &Uuid, mix_index: i16) -> Result<Vec<Vec<Ciphertext>>, DbError> {
+        let rows = self.client.query("
+            SELECT enc_vote, enc_voter_id, enc_param_a, enc_param_b, enc_param_r_a, enc_param_r_b
+            FROM wbb_votes_mix
+            WHERE session=$1 AND mix_index=$2
+            ORDER BY index
+        ", &[session, &mix_index]).await?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let s: String = row.get(0);
+            let vote = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("vote"))?;
+            let s: String = row.get(1);
+            let id = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("voter id"))?;
+            let s: String = row.get(2);
+            let a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("a"))?;
+            let s: String = row.get(3);
+            let b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("b"))?;
+            let s: String = row.get(4);
+            let r_a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_a"))?;
+            let s: String = row.get(5);
+            let r_b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_b"))?;
+            result.push(vec![vote, id, a, b, r_a, r_b]);
+        }
+
+        Ok(result)
+    }
+
     pub async fn find_ec_commit(&self, session: &Uuid, voter: String) -> Result<bool, DbError> {
         let row = self.client.query_one("
             SELECT EXISTS(SELECT 1 FROM wbb_commits WHERE session=$1 AND voter_id=$2);
@@ -423,7 +551,7 @@ impl DbClient {
         self.client.execute("
             DROP TABLE IF EXISTS
                 trustees, sessions, parameters, parameter_signatures, keygen_commitments,
-                wbb_idents, wbb_commits, wbb_votes
+                wbb_idents, wbb_commits, wbb_votes, wbb_votes_mix, wbb_votes_mix_proofs
             CASCADE;
         ", &[]).await?;
 

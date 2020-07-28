@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
 
     println!("Sending vote data...");
     let mut handles = Vec::new();
-    const N: usize = 50;
+    const N: usize = 100;
     for i in 0..N {
         let addr = ec.address();
         let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidates)?;
@@ -60,6 +60,11 @@ async fn main() -> Result<()> {
     println!("Votes closing soon...");
     ec.close_votes(N).await?;
     time::delay_for(Duration::from_millis(500)).await;
+
+    for trustee in &trustees {
+        trustee.mix_votes().await?;
+        println!("shuffle #{} done", trustee.index());
+    }
 
     Ok(())
 }

@@ -5,6 +5,7 @@ use cryptid::Scalar;
 use cryptid::elgamal::{PublicKey, Ciphertext};
 use serde::{Serialize, Deserialize};
 use crate::vote::VoterId;
+use cryptid::shuffle::ShuffleProof;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TrusteeMessage {
@@ -34,6 +35,16 @@ pub enum TrusteeMessage {
         enc_b: Ciphertext,
         enc_r_a: Ciphertext,
         enc_r_b: Ciphertext,
+    },
+    EcVoteMix {
+        mix_index: i16,
+        enc_votes: Vec<Ciphertext>,
+        enc_voter_ids: Vec<Ciphertext>,
+        enc_as: Vec<Ciphertext>,
+        enc_bs: Vec<Ciphertext>,
+        enc_r_as: Vec<Ciphertext>,
+        enc_r_bs: Vec<Ciphertext>,
+        proof: ShuffleProof,
     }
 }
 
@@ -69,6 +80,7 @@ pub struct WrappedResponse {
 pub enum Response {
     PublicKey(SigningPubKey),
     ResultSet(Vec<SignedMessage>),
+    Ciphertexts(Vec<Vec<Ciphertext>>),
     Outcome(bool),
     Ok,
     SessionExists,
