@@ -8,6 +8,7 @@ use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext, CurveElem};
 use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty, KeygenCommitment};
 use cryptid::AsBase64;
 use reqwest::Client;
+use reqwest::multipart::{Form, Part};
 use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
@@ -566,9 +567,9 @@ impl Trustee {
         }
 
         // Re-randomise encryptions
-        let r = info.ctx.random_power();
+        let r = info.ctx.random_scalar();
         let enc_mac = info.pubkey.rerand(&info.ctx, &enc_mac, &r);
-        let r = info.ctx.random_power();
+        let r = info.ctx.random_scalar();
         let enc_vote = info.pubkey.rerand(&info.ctx, &enc_vote, &r);
 
         // Construct message
@@ -633,22 +634,22 @@ impl Trustee {
         }
 
         // Re-randomise encryptions
-        let r = info.ctx.random_power();
+        let r = info.ctx.random_scalar();
         let enc_id = info.pubkey.rerand(&info.ctx, &ballot.p2_enc_id, &r);
-        let r = info.ctx.random_power();
+        let r = info.ctx.random_scalar();
         let enc_a = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_a, &r);
-        let r = info.ctx.random_power();
+        let r = info.ctx.random_scalar();
         let enc_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_b, &r);
-        let r = info.ctx.random_power();
+        let r = info.ctx.random_scalar();
         let enc_r_a = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_a, &r);
-        let r = info.ctx.random_power();
+        let r = info.ctx.random_scalar();
         let enc_r_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_b, &r);
 
         let vote = ballot.p1_vote;
         let vote_value = u128::from_str_radix(&vote, 10)
             .map_err(|_| TrusteeError::Decode)?;
         let vote_value: Scalar = vote_value.into();
-        let prf_enc_vote = info.ctx.random_power();
+        let prf_enc_vote = info.ctx.random_scalar();
         let enc_vote = info.pubkey.encrypt(&info.ctx, &CurveElem::try_encode(vote_value)?, &prf_enc_vote);
 
         // Construct message
@@ -672,7 +673,11 @@ impl Trustee {
 
     pub async fn mix_votes(&self) -> Result<(), TrusteeError> {
         // download votes
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .gzip(true)
+            .timeout(Duration::from_secs(60))
+            .build().map_err(|_| TrusteeError::InvalidState)?;
+
         let response: WrappedResponse = if self.info.index == 1 {
             // if index 1, get the raw votes
             client.get(&format!("{}/{}/tally/vote", &self.info.api_base_addr, &self.info.session_id))
@@ -690,6 +695,8 @@ impl Trustee {
             return Err(TrusteeError::Api);
         }
 
+        println!("#{}: Votes downloaded", self.info.index);
+
         let result = match response.msg {
             Response::Ciphertexts(cts) => cts,
             _ => {
@@ -698,9 +705,11 @@ impl Trustee {
         };
 
         let mut ctx = self.info.ctx.clone();
-        let commit_ctx = PedersenCtx::new(self.info.session_id.as_bytes(), ctx.clone(), result.len() + 1);
+        let (commit_ctx, generators) = PedersenCtx::with_generators(self.info.session_id.as_bytes(), result.len());
         let shuffle = Shuffle::new(ctx.clone(), result, &self.info.pubkey)?;
-        let proof = shuffle.gen_proof(&mut ctx, &commit_ctx, &self.info.pubkey)?;
+        println!("#{}: Shuffled", self.info.index);
+        let proof = shuffle.gen_proof(&mut ctx, &commit_ctx, &generators, &self.info.pubkey)?;
+        println!("#{}: Generated proof", self.info.index);
 
         let outputs = shuffle.outputs().to_vec();
         let mut enc_votes = Vec::new();
@@ -738,14 +747,22 @@ impl Trustee {
             signature,
             sender_id: self.info.id.clone()
         };
+
+        // Construct multipart form
+        let bytes = serde_json::to_string(&msg)?;
+        let bytes = bytes.as_bytes().to_vec();
+        let form = Form::new().part("msg", Part::bytes(bytes.clone()));
+
         let res: WrappedResponse = client.post(&format!("{}/{}/tally/vote_mix", &self.info.api_base_addr, &self.info.session_id))
-            .json(&msg)
+            .multipart(form)
             .send().await?
             .json().await?;
+
         if !res.status {
             eprintln!("error getting votes: {:?}", res.msg);
         }
 
+        println!("#{}: Uploaded shuffle", self.info.index);
         Ok(())
     }
 }

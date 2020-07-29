@@ -12,8 +12,10 @@ cryptid = { git = "https://github.com/eleanor-em/cryptid" }
 confy = "0"
 rocket = "0"
 rocket_contrib = { version = "0", default-features = false, features = ["json"] }
+rocket-multipart-form-data = "0.9"
 tokio-postgres = { version = "0", features = ["with-uuid-0_8", "with-serde_json-1"] }
 futures = "0"
 uuid = { version = "0", features = ["serde", "v4"] }
 tokio = { version = "0.2", features = ["full"] }
 base64 = "0"
+serde_json = "1"

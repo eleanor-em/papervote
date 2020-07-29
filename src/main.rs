@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     let cfg: PapervoteConfig = confy::load(APP_NAME)?;
     let session_id = Uuid::new_v4();
     let ctx = CryptoContext::new()?;
-    let commit_ctx = PedersenCtx::new(session_id.as_bytes(), ctx.clone(), 1);
+    let commit_ctx = PedersenCtx::new(session_id.as_bytes());
 
     let api = Api::new().await?;
     std::thread::spawn(move || api.start());
@@ -43,7 +43,8 @@ async fn main() -> Result<()> {
 
     println!("Sending vote data...");
     let mut handles = Vec::new();
-    const N: usize = 100;
+
+    const N: usize = 3000;
     for i in 0..N {
         let addr = ec.address();
         let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidates)?;
@@ -59,7 +60,7 @@ async fn main() -> Result<()> {
 
     println!("Votes closing soon...");
     ec.close_votes(N).await?;
-    time::delay_for(Duration::from_millis(500)).await;
+    time::delay_for(Duration::from_millis(1000)).await;
 
     for trustee in &trustees {
         trustee.mix_votes().await?;

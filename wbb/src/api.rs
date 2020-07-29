@@ -2,8 +2,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::{executor, TryFutureExt};
-use rocket::State;
+use rocket::{Data, State};
 use rocket_contrib::json::Json;
+use rocket::http::ContentType;
+use rocket_multipart_form_data::{MultipartFormDataOptions, MultipartFormData, MultipartFormDataField};
 use uuid::Uuid;
 
 use common::sign::SignedMessage;
@@ -344,13 +346,29 @@ fn get_ec_votes_inner(state: State<'_, Api>, session: String) -> EitherResponse 
     Ok(success(Response::Ciphertexts(results)))
 }
 
-#[rocket::post("/api/<session>/tally/vote_mix", format = "json", data = "<msg>")]
-fn post_ec_vote_mix(state: State<'_, Api>, session: String, msg: Json<SignedMessage>) -> Json<WrappedResponse> {
-    respond(post_ec_vote_mix_inner(state, session, msg))
+#[rocket::post("/api/<session>/tally/vote_mix", data = "<data>")]
+fn post_ec_vote_mix(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
+    respond(post_ec_vote_mix_inner(state, content_type, session, data))
 }
-fn post_ec_vote_mix_inner(state: State<'_, Api>, session: String, msg: Json<SignedMessage>) -> EitherResponse {
+fn post_ec_vote_mix_inner(state: State<'_, Api>, content_type: &ContentType,  session: String, data: Data) -> EitherResponse {
     let session = Uuid::from_str(&session)
         .map_err(|_| failure(Response::InvalidSession))?;
+
+    // parse multipart form
+    let options = MultipartFormDataOptions::with_multipart_form_data_fields(
+        vec! [
+            MultipartFormDataField::raw("msg").size_limit(1024 * 1024 * 40)
+        ]
+    );
+    let mut data = MultipartFormData::parse(content_type, data, options)
+        .map_err(|_| failure(Response::ParseError))?;
+    let msg = data.raw.remove("msg")
+        .ok_or(failure(Response::ParseError))?
+        .remove(0);
+    let msg: SignedMessage = serde_json::from_str(String::from_utf8(msg.raw)
+            .map_err(|_| failure(Response::ParseError))?
+            .as_str())
+        .map_err(|_| failure(Response::ParseError))?;
 
     let (mix_index, enc_votes, enc_voter_ids, enc_as, enc_bs, enc_r_as, enc_r_bs, proof) = match &msg.inner {
         TrusteeMessage::EcVoteMix {
