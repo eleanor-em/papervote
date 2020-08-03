@@ -1,8 +1,8 @@
 use crate::sign::{SignedMessage, SigningPubKey};
 use uuid::Uuid;
-use cryptid::threshold::KeygenCommitment;
+use cryptid::threshold::{KeygenCommitment, DecryptShare};
 use cryptid::Scalar;
-use cryptid::elgamal::{PublicKey, Ciphertext};
+use cryptid::elgamal::{PublicKey, Ciphertext, CurveElem};
 use serde::{Serialize, Deserialize};
 use crate::vote::VoterId;
 use cryptid::shuffle::ShuffleProof;
@@ -20,6 +20,7 @@ pub enum TrusteeMessage {
     },
     KeygenSign {
         pubkey: PublicKey,
+        pubkey_share: CurveElem,
     },
     EcCommit {
         voter_id: VoterId,
@@ -45,6 +46,10 @@ pub enum TrusteeMessage {
         enc_r_as: Vec<Ciphertext>,
         enc_r_bs: Vec<Ciphertext>,
         proof: ShuffleProof,
+    },
+    EcVoteDecrypt {
+        signatures: Vec<Vec<u8>>,
+        shares: Vec<Vec<DecryptShare>>,
     }
 }
 
@@ -52,6 +57,7 @@ pub enum TrusteeMessage {
 pub struct TrusteeInfo {
     pub id: Uuid,
     pub pubkey: SigningPubKey,
+    pub pubkey_share: Option<CurveElem>,
     pub index: usize,
     pub address: String,
 }

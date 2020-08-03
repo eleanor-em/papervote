@@ -41,6 +41,7 @@ impl Api {
                 find_ec_commit,
                 post_ec_vote,
                 post_ec_vote_mix,
+                post_ec_vote_decrypt,
                 get_ec_votes,
                 get_ec_mix_votes,
             ])
@@ -202,11 +203,13 @@ fn sign_pubkey(state: State<'_, Api>, session: String, msg: Json<SignedMessage>)
 fn sign_pubkey_inner(state: State<'_, Api>, session: String, msg: Json<SignedMessage>) -> EitherResponse {
     let session = Uuid::from_str(&session)
         .map_err(|_| failure(Response::InvalidSession))?;
-    let pubkey = match &msg.inner {
-        TrusteeMessage::KeygenSign { pubkey } => Ok(pubkey),
+
+    let (pubkey, pubkey_share) = match &msg.inner {
+        TrusteeMessage::KeygenSign { pubkey, pubkey_share } => Ok((pubkey, pubkey_share)),
         _ => Err(failure(Response::InvalidRequest))
     }?;
-    executor::block_on(state.db.clone().insert_pubkey_sig(&session, &msg.sender_id, &pubkey, &msg.signature))
+
+    executor::block_on(state.db.clone().insert_pubkey_sig(&session, &msg.sender_id, pubkey, pubkey_share, &msg.signature))
         .map_err(|e| {
             eprintln!("Error: {}", e);
             failure(Response::MiscError)
@@ -244,9 +247,9 @@ fn post_ident_inner(state: State<'_, Api>, session: String, msg: Json<VoterMessa
         _ => Err(failure(Response::InvalidRequest))
     }?;
 
-    executor::block_on(state.db.clone().insert_ident(&session, voter_id, &c_a, &c_b))
+    Ok(executor::block_on(state.db.clone().insert_ident(&session, voter_id, &c_a, &c_b))
         .map(|_| success(Response::Ok))
-        .map_err(|_| failure(Response::TrusteeMissing))
+        .map_err(|_| failure(Response::TrusteeMissing))?)
 }
 
 #[rocket::post("/api/<session>/cast/commit", format = "json", data = "<msg>")]
@@ -415,4 +418,57 @@ fn get_ec_mix_votes_inner(state: State<'_, Api>, session: String, mix_index: i16
             failure(Response::MiscError)
         })?;
     Ok(success(Response::Ciphertexts(results)))
+}
+
+
+#[rocket::post("/api/<session>/tally/vote_mix/decrypt", data = "<data>")]
+fn post_ec_vote_decrypt(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
+    respond(post_ec_vote_decrypt_inner(state, content_type, session, data))
+}
+fn post_ec_vote_decrypt_inner(state: State<'_, Api>, content_type: &ContentType,  session: String, data: Data) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    // parse multipart form
+    let options = MultipartFormDataOptions::with_multipart_form_data_fields(
+        vec! [
+            MultipartFormDataField::raw("msg").size_limit(1024 * 1024 * 40)
+        ]
+    );
+    let mut data = MultipartFormData::parse(content_type, data, options)
+        .map_err(|_| failure(Response::ParseError))?;
+    let msg = data.raw.remove("msg")
+        .ok_or(failure(Response::ParseError))?
+        .remove(0);
+    let msg: SignedMessage = serde_json::from_str(String::from_utf8(msg.raw)
+        .map_err(|_| failure(Response::ParseError))?
+        .as_str())
+        .map_err(|_| failure(Response::ParseError))?;
+
+    let (signatures, shares) = match &msg.inner {
+        TrusteeMessage::EcVoteDecrypt { signatures, shares} => Ok((signatures, shares)),
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    let db = state.db.clone();
+
+    // Verify the signature to ensure this was sent by an EC rep
+    let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
+        .map_err(|_| failure(Response::InvalidSignature))?;
+    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+        return Err(failure(Response::InvalidSignature));
+    }
+
+    executor::block_on(db.insert_ec_vote_decrypt(&session, &msg.sender_id, signatures, shares))
+        .map_err(|e| {
+            match e {
+                DbError::InsertAlreadyExists => failure(Response::FailedInsertion),
+                _ => {
+                    eprintln!("unexpected error: {}", e);
+                    failure(Response::MiscError)
+                }
+            }
+        })?;
+
+    Ok(success(Response::Ok))
 }

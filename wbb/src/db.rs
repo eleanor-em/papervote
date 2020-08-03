@@ -3,8 +3,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use cryptid::{AsBase64, Scalar};
-use cryptid::elgamal::{PublicKey, Ciphertext};
-use cryptid::threshold::KeygenCommitment;
+use cryptid::elgamal::{PublicKey, Ciphertext, CurveElem};
+use cryptid::threshold::{KeygenCommitment, DecryptShare};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -104,7 +104,8 @@ impl DbClient {
                 id              SERIAL PRIMARY KEY,
                 session         UUID NOT NULL,
                 trustee         UUID NOT NULL,
-                pubkey_sig      TEXT NOT NULL UNIQUE,
+                pubkey_share    TEXT NOT NULL UNIQUE,
+                signature       TEXT NOT NULL UNIQUE,
                 CONSTRAINT      unqiue_trustee_keygen_sig UNIQUE(session, trustee)
             );
             CREATE TABLE IF NOT EXISTS keygen_commitments (
@@ -168,6 +169,15 @@ impl DbClient {
                 CONSTRAINT      unique_wbb_votes_mix_proofs_session_index UNIQUE(session, mix_index),
                 CONSTRAINT      unique_wbb_votes_mix_proofs_session_signer UNIQUE(session, signed_by)
             );
+            CREATE TABLE IF NOT EXISTS wbb_votes_decrypt (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                index           INTEGER NOT NULL,
+                trustee         UUID NOT NULL,
+                signature       TEXT UNIQUE NOT NULL,
+                share           TEXT UNIQUE NOT NULL,
+                CONSTRAINT      unique_wbb_votes_decrypt UNIQUE(session, index, trustee)
+            );
         ").await?;
 
         Ok(())
@@ -224,7 +234,7 @@ impl DbClient {
         }
     }
 
-    pub async fn insert_pubkey_sig(&self, session: &Uuid, trustee: &Uuid, pubkey: &PublicKey, signature: &[u8]) -> Result<(), DbError> {
+    pub async fn insert_pubkey_sig(&self, session: &Uuid, trustee: &Uuid, pubkey: &PublicKey, pubkey_share: &CurveElem, signature: &[u8]) -> Result<(), DbError> {
         // For conflicts, don't worry because we only care about the signatures
         self.client.execute("
             INSERT INTO parameters(session, pubkey)
@@ -233,11 +243,12 @@ impl DbClient {
         ", &[&session, &pubkey.as_base64()]).await?;
 
         let result = self.client.execute("
-            INSERT INTO parameter_signatures(session, trustee, pubkey_sig)
-            VALUES($1, $2, $3);
+            INSERT INTO parameter_signatures(session, trustee, pubkey_share, signature)
+            VALUES($1, $2, $3, $4);
         ", &[
             &session,
             &trustee,
+            &pubkey_share.as_base64(),
             &base64::encode(signature)
         ]).await?;
 
@@ -347,6 +358,27 @@ impl DbClient {
         }
     }
 
+    pub async fn insert_ec_vote_decrypt(&self,
+                                        session: &Uuid,
+                                        trustee: &Uuid,
+                                        signatures: &[Vec<u8>],
+                                        shares: &[Vec<DecryptShare>]
+    ) -> Result<(), DbError> {
+        for i in 0..shares.len() {
+            if self.client.execute("
+                INSERT INTO wbb_votes_decrypt(session, index, trustee, signature, share)
+                VALUES ($1, $2, $3, $4, $5)
+            ", &[session, &(i as i32), trustee, &base64::encode(&signatures[i]),
+                &serde_json::to_string(&shares[i])
+                    .map_err(|_| DbError::SchemaFailure("share"))?
+            ]).await? == 0 {
+                return Err(DbError::InsertAlreadyExists);
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn count_trustees(&self, session: &Uuid) -> Result<usize, DbError> {
         let result = self.client.query_one("
             SELECT COUNT(1) FROM trustees WHERE session=$1;
@@ -390,6 +422,7 @@ impl DbClient {
             let info = TrusteeInfo {
                 id: uuid.clone(),
                 pubkey,
+                pubkey_share: None, // Assume this isn't being used
                 index: index as usize,
                 address
             };
@@ -418,6 +451,7 @@ impl DbClient {
             let info = TrusteeInfo {
                 id,
                 pubkey,
+                pubkey_share: None,
                 index: index as usize,
                 address
             };
@@ -458,10 +492,11 @@ impl DbClient {
             SELECT pubkey FROM parameters WHERE session=$1;
         ", &[&session]).await.map_err(|_| DbError::NotEnoughRows)?;
         let pubkey: String = row.get("pubkey");
-        let pubkey: PublicKey = PublicKey::try_from_base64(pubkey.as_str()).map_err(|_| DbError::SchemaFailure("pubkey"))?;
+        let pubkey = PublicKey::try_from_base64(pubkey.as_str())
+            .map_err(|_| DbError::SchemaFailure("pubkey"))?;
 
         let rows = self.client.query("
-            SELECT trustee, pubkey_sig
+            SELECT trustee, pubkey_share, signature
             FROM parameter_signatures
             WHERE session=$1;
         ", &[&session]).await?;
@@ -469,9 +504,14 @@ impl DbClient {
         let mut result = Vec::with_capacity(rows.len());
         for row in rows {
             let sender_id: Uuid = row.get("trustee");
-            let signature: String = row.get("pubkey_sig");
-            let signature: Vec<u8> = base64::decode(&signature).map_err(|_| DbError::SchemaFailure("signature"))?;
-            let inner = TrusteeMessage::KeygenSign { pubkey };
+            let signature: String = row.get("signature");
+            let signature: Vec<u8> = base64::decode(&signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
+            let pubkey_share: String = row.get("pubkey_share");
+            let pubkey_share = CurveElem::try_from_base64(pubkey_share.as_str())
+                .map_err(|_| DbError::SchemaFailure("pubkey_share"))?;
+
+            let inner = TrusteeMessage::KeygenSign { pubkey, pubkey_share };
 
             result.push(SignedMessage {
                 inner,

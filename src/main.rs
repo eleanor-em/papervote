@@ -26,25 +26,32 @@ async fn main() -> Result<()> {
     let ctx = CryptoContext::new()?;
     let commit_ctx = PedersenCtx::new(session_id.as_bytes());
 
+    // Start the web server
     let api = Api::new().await?;
     std::thread::spawn(move || api.start());
 
+    // Create a new election session
     open_session(&cfg, session_id.clone()).await?;
 
+    // Build the candidate list
     let candidates = get_candidates();
+
+    // Create the trustees and run key generation
     let mut trustees = create_trustees(&cfg, ctx.clone(), session_id.clone()).await?;
     let pubkey = trustees[0].pubkey();
 
+    // Start listening for votes
     let ec = &mut trustees[0];
     ec.receive_voter_data(candidates.clone());
     time::delay_for(Duration::from_millis(200)).await;
 
+    // Send votes
     let candidates: Vec<_> = candidates.values().collect();
 
     println!("Sending vote data...");
     let mut handles = Vec::new();
 
-    const N: usize = 3000;
+    const N: usize = 1000;
     for i in 0..N {
         let addr = ec.address();
         let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidates)?;
@@ -58,13 +65,21 @@ async fn main() -> Result<()> {
 
     futures::future::join_all(handles).await;
 
+    // Close vote listener
     println!("Votes closing soon...");
     ec.close_votes(N).await?;
     time::delay_for(Duration::from_millis(1000)).await;
 
-    for trustee in &trustees {
+    // Run first shuffle
+    for trustee in trustees.iter() {
         trustee.mix_votes().await?;
         println!("shuffle #{} done", trustee.index());
+    }
+
+    // Run first decryption
+    for trustee in trustees.iter() {
+        trustee.decrypt_first_mix().await?;
+        println!("decrypt #{} done", trustee.index());
     }
 
     Ok(())

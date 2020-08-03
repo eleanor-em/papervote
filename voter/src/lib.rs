@@ -68,7 +68,7 @@ pub struct Voter {
 impl Voter {
     pub fn new(session_id: Uuid,
                pubkey: PublicKey,
-               mut ctx: CryptoContext,
+               ctx: CryptoContext,
                commit_ctx: PedersenCtx,
                voter_id: String) -> Result<Self, VoterError> {
         Ok(Self {
@@ -148,10 +148,10 @@ impl Voter {
             p1_enc_b: b.clone(),
             p1_enc_r_a: r_a.clone(),
             p1_enc_r_b: r_b.clone(),
-            p1_prf_a: PrfKnowDlog::new(&mut self.ctx, &g, &prf_a, &a.c1)?,
-            p1_prf_b: PrfKnowDlog::new(&mut self.ctx, &g, &prf_b, &b.c1)?,
-            p1_prf_r_a: PrfKnowDlog::new(&mut self.ctx, &g, &prf_r_a, &r_a.c1)?,
-            p1_prf_r_b: PrfKnowDlog::new(&mut self.ctx, &g, &prf_r_b, &r_b.c1)?,
+            p1_prf_a: PrfKnowDlog::new(&mut self.ctx, &g, &prf_a, &a.c1),
+            p1_prf_b: PrfKnowDlog::new(&mut self.ctx, &g, &prf_b, &b.c1),
+            p1_prf_r_a: PrfKnowDlog::new(&mut self.ctx, &g, &prf_r_a, &r_a.c1),
+            p1_prf_r_b: PrfKnowDlog::new(&mut self.ctx, &g, &prf_r_b, &r_b.c1),
             p2_id: self.voter_id.clone(),
             p2_enc_id: id,
             p2_prf_enc: prf_id,
@@ -204,11 +204,11 @@ impl Voter {
 
         let g = self.ctx.generator();
 
-        let prf_know_mac = PrfKnowDlog::new(&mut self.ctx, &g, &r1, &enc_mac.c1)?;
-        assert!(prf_know_mac.verify()?);
+        let prf_know_mac = PrfKnowDlog::new(&mut self.ctx, &g, &r1, &enc_mac.c1);
+        assert!(prf_know_mac.verify());
 
-        let prf_know_vote = PrfKnowDlog::new(&mut self.ctx, &g, &r1, &enc_mac.c1)?;
-        assert!(prf_know_vote.verify()?);
+        let prf_know_vote = PrfKnowDlog::new(&mut self.ctx, &g, &r1, &enc_mac.c1);
+        assert!(prf_know_vote.verify());
 
         Ok(VoterMessage::EcCommit {
             voter_id: self.voter_id.clone(),
