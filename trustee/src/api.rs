@@ -1,17 +1,19 @@
 use reqwest::multipart::{Form, Part};
-use common::net::{TrusteeMessage, WrappedResponse, Response};
-use common::sign::{SignedMessage, SigningKeypair};
-use common::vote::VoterId;
+use common::net::{TrusteeMessage, WrappedResponse, Response, TrusteeInfo};
+use common::sign::{SignedMessage, SigningKeypair, Signature};
+use common::voter::{VoterId, VoterIdent};
 use cryptid::elgamal::Ciphertext;
 use crate::{TrusteeError, InternalInfo};
 use uuid::Uuid;
 use cryptid::shuffle::ShuffleProof;
 use cryptid::threshold::{ThresholdParty, DecryptShare};
-use cryptid::commit::Commitment;
+use cryptid::commit::{CtCommitment};
+use std::collections::HashMap;
+use common::trustee::{EcCommit, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare};
 
-fn sign(keypair: &SigningKeypair, msg: &TrusteeMessage) -> Result<Vec<u8>, TrusteeError> {
+fn sign(keypair: &SigningKeypair, msg: &TrusteeMessage) -> Result<Signature, TrusteeError> {
     let data = serde_json::to_string(&msg)?.as_bytes().to_vec();
-    Ok(keypair.sign(&data).as_ref().to_vec())
+    Ok(keypair.sign(&data))
 }
 
 pub async fn post_ec_commit(
@@ -20,7 +22,7 @@ pub async fn post_ec_commit(
     enc_mac: Ciphertext,
     enc_vote: Ciphertext
 ) -> Result<(), TrusteeError> {
-    let inner = TrusteeMessage::EcCommit { voter_id, enc_mac, enc_vote };
+    let inner = TrusteeMessage::EcCommit(EcCommit { voter_id, enc_mac, enc_vote });
     let signature = sign(&info.signing_keypair, &inner)?;
 
     let msg = SignedMessage {
@@ -88,7 +90,7 @@ pub async fn post_shuffle(
 
 pub async fn post_decrypt_shares(
     info: &InternalInfo,
-    signatures: Vec<Vec<u8>>,
+    signatures: Vec<Signature>,
     shares: Vec<Vec<DecryptShare>>
 ) -> Result<(), TrusteeError> {
     let inner = TrusteeMessage::EcVoteDecrypt {
@@ -123,12 +125,10 @@ pub async fn post_decrypt_shares(
 pub async fn post_pet_commits(
     info: &InternalInfo,
     voter_ids: Vec<VoterId>,
-    vote_commits: Vec<(Commitment, Commitment)>,
-    mac_commits: Vec<(Commitment, Commitment)>,
-    signatures: Vec<Vec<u8>>
+    vote_commits: Vec<CtCommitment>,
+    mac_commits: Vec<CtCommitment>,
+    signatures: Vec<Signature>
 ) -> Result<(), TrusteeError> {
-
-
     let inner = TrusteeMessage::EcPetCommit {
         voter_ids,
         vote_commits,
@@ -150,6 +150,76 @@ pub async fn post_pet_commits(
     let form = Form::new().part("msg", Part::bytes(bytes.clone()));
 
     let response: WrappedResponse = info.client.post(&format!("{}/{}/tally/pet/commit", &info.api_base_addr, &info.session_id))
+        .multipart(form)
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        Err(TrusteeError::FailedResponse(response.msg))
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn post_pet_openings(
+    info: &InternalInfo,
+    voter_ids: Vec<VoterId>,
+    openings: Vec<SignedPetOpening>
+) -> Result<(), TrusteeError> {
+    let inner = TrusteeMessage::EcPetOpening {
+        voter_ids,
+        openings,
+    };
+
+    let signature = sign(&info.signing_keypair, &inner)?;
+
+    let msg = SignedMessage {
+        inner,
+        signature,
+        sender_id: info.id.clone()
+    };
+
+    // Construct multipart form
+    let bytes = serde_json::to_string(&msg)?;
+    let bytes = bytes.as_bytes().to_vec();
+    let form = Form::new().part("msg", Part::bytes(bytes.clone()));
+
+    let response: WrappedResponse = info.client.post(&format!("{}/{}/tally/pet/opening", &info.api_base_addr, &info.session_id))
+        .multipart(form)
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        Err(TrusteeError::FailedResponse(response.msg))
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn post_pet_decryptions(
+    info: &InternalInfo,
+    voter_ids: Vec<VoterId>,
+    shares: Vec<SignedPetDecryptShare>
+) -> Result<(), TrusteeError> {
+    let inner = TrusteeMessage::EcPetDecrypt {
+        voter_ids,
+        shares,
+    };
+
+    let signature = sign(&info.signing_keypair, &inner)?;
+
+    let msg = SignedMessage {
+        inner,
+        signature,
+        sender_id: info.id.clone()
+    };
+
+    // Construct multipart form
+    let bytes = serde_json::to_string(&msg)?;
+    let bytes = bytes.as_bytes().to_vec();
+    let form = Form::new().part("msg", Part::bytes(bytes.clone()));
+
+    let response: WrappedResponse = info.client.post(&format!("{}/{}/tally/pet/decrypt", &info.api_base_addr, &info.session_id))
         .multipart(form)
         .send().await?
         .json().await?;
@@ -187,7 +257,7 @@ pub async fn get_votes(
     Ok(votes)
 }
 
-pub async fn get_idents(info: &InternalInfo) -> Result<Vec<(VoterId, Commitment, Commitment)>, TrusteeError> {
+pub async fn get_idents(info: &InternalInfo) -> Result<Vec<VoterIdent>, TrusteeError> {
     // Download decryption shares
     let response: WrappedResponse = info.client.get(&format!("{}/{}/cast/ident",
                                                                   &info.api_base_addr,
@@ -201,13 +271,11 @@ pub async fn get_idents(info: &InternalInfo) -> Result<Vec<(VoterId, Commitment,
 
     match response.msg {
         Response::Idents(idents) => Ok(idents),
-        _ => {
-            Err(TrusteeError::InvalidResponse)
-        }
+        _ => Err(TrusteeError::InvalidResponse)
     }
 }
 
-pub async fn get_ec_commitments(info: &InternalInfo) -> Result<Vec<(VoterId, Ciphertext, Ciphertext)>, TrusteeError> {
+pub async fn get_ec_commitments(info: &InternalInfo) -> Result<Vec<EcCommit>, TrusteeError> {
     // Download decryption shares
     let response: WrappedResponse = info.client.get(&format!("{}/{}/cast/commit",
                                                                   &info.api_base_addr,
@@ -223,10 +291,9 @@ pub async fn get_ec_commitments(info: &InternalInfo) -> Result<Vec<(VoterId, Cip
         Response::ResultSet(results) => {
             results.into_iter()
                 .map(|msg| {
-                    if let TrusteeMessage::EcCommit { voter_id, enc_mac, enc_vote } = msg.inner {
-                        Some((voter_id, enc_mac, enc_vote))
-                    } else {
-                        None
+                    match msg.inner {
+                        TrusteeMessage::EcCommit(commit) => Some(commit),
+                        _ => None,
                     }
                 }).collect::<Option<_>>()
                 .ok_or(TrusteeError::InvalidResponse)
@@ -237,7 +304,7 @@ pub async fn get_ec_commitments(info: &InternalInfo) -> Result<Vec<(VoterId, Cip
     }
 }
 
-pub async fn get_decrypt_shares(info: &InternalInfo) -> Result<Vec<Vec<(Uuid, Vec<u8>, Vec<DecryptShare>)>>, TrusteeError> {
+pub async fn get_decrypt_shares(trustee_info: &HashMap<Uuid, TrusteeInfo>, info: &InternalInfo) -> Result<Vec<Vec<SignedDecryptShareSet>>, TrusteeError> {
     let response: WrappedResponse = info.client.get(&format!("{}/{}/tally/mixed",
                                                                   &info.api_base_addr,
                                                                   &info.session_id))
@@ -255,5 +322,167 @@ pub async fn get_decrypt_shares(info: &InternalInfo) -> Result<Vec<Vec<(Uuid, Ve
         }
     };
 
+    // Check signatures
+    for share_row in decrypt_shares.iter() {
+        for share_set in share_row.iter() {
+            if !share_set.verify(&trustee_info[&share_set.trustee_id].pubkey) {
+                return Err(TrusteeError::InvalidSignature);
+            }
+        }
+    }
+
     Ok(decrypt_shares)
+}
+
+pub async fn count_pet_commits(info: &InternalInfo) -> Result<i64, TrusteeError> {
+    let response: WrappedResponse = info.client.get(&format!("{}/{}/tally/pet/commit/count",
+                                                             &info.api_base_addr,
+                                                             &info.session_id))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(TrusteeError::FailedResponse(response.msg));
+    }
+
+    let result = match response.msg {
+        Response::Count(result) => result,
+        _ => {
+            return Err(TrusteeError::InvalidResponse);
+        }
+    };
+
+    Ok(result)
+}
+
+// Returns a map from trustee IDs to a map from voter IDs to pairs (vote_commit, mac_commit).
+pub async fn get_pet_commits(trustee_info: &HashMap<Uuid, TrusteeInfo>,
+                                info: &InternalInfo
+) -> Result<HashMap<Uuid, HashMap<VoterId, (CtCommitment, CtCommitment)>>, TrusteeError> {
+    let response: WrappedResponse = info.client.get(&format!("{}/{}/tally/pet/commit",
+                                                             &info.api_base_addr,
+                                                             &info.session_id))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(TrusteeError::FailedResponse(response.msg));
+    }
+
+    let mut commits = match response.msg {
+        Response::PetCommits(results) => results,
+        _ => {
+            return Err(TrusteeError::InvalidResponse);
+        }
+    };
+
+    let mut result = HashMap::new();
+
+    // Check signatures
+    for trustee in trustee_info.keys() {
+        let pubkey = &trustee_info[trustee].pubkey;
+        let rows = commits.remove(trustee).unwrap();
+
+        for (voter_id, (signature, vote_commit, mac_commit)) in rows.into_iter() {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(voter_id.to_string().as_bytes());
+            bytes.extend_from_slice(vote_commit.to_string().as_bytes());
+            bytes.extend_from_slice(mac_commit.to_string().as_bytes());
+
+            if !pubkey.verify(&bytes, &signature) {
+                return Err(TrusteeError::InvalidSignature);
+            } else {
+                result.entry(*trustee)
+                    .or_insert(HashMap::new())
+                    .entry(voter_id)
+                    .or_insert((vote_commit, mac_commit));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+pub async fn get_pet_openings(trustee_info: &HashMap<Uuid, TrusteeInfo>,
+                                 info: &InternalInfo
+) -> Result<HashMap<Uuid, HashMap<VoterId, SignedPetOpening>>, TrusteeError> {
+    let response: WrappedResponse = info.client.get(&format!("{}/{}/tally/pet/opening",
+                                                             &info.api_base_addr,
+                                                             &info.session_id))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(TrusteeError::FailedResponse(response.msg));
+    }
+
+    let mut commits = match response.msg {
+        Response::PetOpenings(results) => results,
+        _ => {
+            return Err(TrusteeError::InvalidResponse);
+        }
+    };
+
+    let mut result = HashMap::new();
+
+    // Check signatures
+    for trustee in trustee_info.keys() {
+        let pubkey = &trustee_info[trustee].pubkey;
+        let rows = commits.remove(trustee).unwrap();
+
+        for (voter_id, opening) in rows {
+            if !opening.verify(pubkey, &voter_id) {
+                return Err(TrusteeError::InvalidSignature);
+            } else {
+                result.entry(*trustee)
+                    .or_insert(HashMap::new())
+                    .entry(voter_id)
+                    .or_insert(opening);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+pub async fn get_pet_decryptions(trustee_info: &HashMap<Uuid, TrusteeInfo>,
+                                 info: &InternalInfo
+) -> Result<HashMap<Uuid, HashMap<VoterId, SignedPetDecryptShare>>, TrusteeError> {
+    let response: WrappedResponse = info.client.get(&format!("{}/{}/tally/pet/decrypt",
+                                                             &info.api_base_addr,
+                                                             &info.session_id))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(TrusteeError::FailedResponse(response.msg));
+    }
+
+    let mut shares = match response.msg {
+        Response::PetDecryptions(results) => results,
+        _ => {
+            return Err(TrusteeError::InvalidResponse);
+        }
+    };
+
+    let mut result = HashMap::new();
+
+    // Check signatures
+    for trustee in trustee_info.keys() {
+        let pubkey = &trustee_info[trustee].pubkey;
+        let rows = shares.remove(trustee).unwrap();
+
+        for (voter_id, share) in rows {
+            if !share.verify(pubkey, &voter_id) {
+                return Err(TrusteeError::InvalidSignature);
+            } else {
+                result.entry(*trustee)
+                    .or_insert(HashMap::new())
+                    .entry(voter_id)
+                    .or_insert(share);
+            }
+        }
+    }
+
+    Ok(result)
 }

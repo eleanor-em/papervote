@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use cryptid::threshold::{ThresholdGenerator, KeygenCommitment, Threshold};
 use cryptid::{Hasher, CryptoError, Scalar};
 use cryptid::elgamal::CryptoContext;
-use common::sign;
 use crate::TrusteeError;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Duration;
@@ -13,7 +12,6 @@ use tokio::time;
 use reqwest::Client;
 use tokio::prelude::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::stream::StreamExt;
-use ring::signature::KeyPair;
 
 pub struct GeneratingTrustee {
     api_base_addr: String,
@@ -38,7 +36,7 @@ impl GeneratingTrustee {
         let id = Uuid::new_v4();
 
         // Generate a signature keypair
-        let signing_keypair = sign::new_keypair(&ctx);
+        let signing_keypair = SigningKeypair::new(&ctx);
 
         // Create identification for this trustee
         let port = 14000 + index;
@@ -166,7 +164,7 @@ impl GeneratingTrustee {
     // Sign the given message
     pub(crate) fn sign(&self, message: TrusteeMessage) -> SignedMessage {
         let data = serde_json::to_string(&message).unwrap().as_bytes().to_vec();
-        let signature = self.signing_keypair.sign(&data).as_ref().to_vec();
+        let signature = self.signing_keypair.sign(&data);
 
         SignedMessage {
             inner: message,

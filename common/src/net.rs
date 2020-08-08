@@ -1,14 +1,14 @@
-use crate::sign::{SignedMessage, SigningPubKey};
+use crate::sign::{SignedMessage, SigningPubKey, Signature};
 use uuid::Uuid;
 use cryptid::threshold::{KeygenCommitment, DecryptShare, PubkeyProof};
-use cryptid::Scalar;
+use cryptid::{Scalar, AsBase64};
 use cryptid::elgamal::{PublicKey, Ciphertext};
 use serde::{Serialize, Deserialize};
-use crate::vote::VoterId;
+use crate::voter::{VoterId, VoterIdent};
 use cryptid::shuffle::ShuffleProof;
-use cryptid::commit::Commitment;
-use cryptid::zkp::PrfEqDlogs;
+use cryptid::commit::CtCommitment;
 use std::collections::HashMap;
+use crate::trustee::{EcCommit, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TrusteeMessage {
@@ -25,11 +25,7 @@ pub enum TrusteeMessage {
         pubkey: PublicKey,
         pubkey_proof: PubkeyProof,
     },
-    EcCommit {
-        voter_id: VoterId,
-        enc_mac: Ciphertext,
-        enc_vote: Ciphertext,
-    },
+    EcCommit(EcCommit),
     EcVote {
         vote: String,
         enc_vote: Ciphertext,
@@ -51,21 +47,23 @@ pub enum TrusteeMessage {
         proof: ShuffleProof,
     },
     EcVoteDecrypt {
-        signatures: Vec<Vec<u8>>,
         shares: Vec<Vec<DecryptShare>>,
+        signatures: Vec<Signature>,
     },
     EcPetCommit {
         voter_ids: Vec<VoterId>,
-        vote_commits: Vec<(Commitment, Commitment)>,
-        mac_commits: Vec<(Commitment, Commitment)>,
-        signatures: Vec<Vec<u8>>,
+        vote_commits: Vec<CtCommitment>,
+        mac_commits: Vec<CtCommitment>,
+        signatures: Vec<Signature>,
     },
     EcPetOpening {
         voter_ids: Vec<VoterId>,
-        vote_openings: Vec<(Ciphertext, Scalar, Scalar)>,
-        mac_openings: Vec<(Ciphertext, Scalar, Scalar)>,
-        signatures: Vec<Vec<u8>>,
+        openings: Vec<SignedPetOpening>,
     },
+    EcPetDecrypt {
+        voter_ids: Vec<VoterId>,
+        shares: Vec<SignedPetDecryptShare>,
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -80,7 +78,7 @@ pub struct TrusteeInfo {
 impl TrusteeInfo {
     pub fn into_signed_msg(self, signature: String) -> Result<SignedMessage, base64::DecodeError> {
         let sender_id = self.id.clone();
-        let signature = base64::decode(&signature)?;
+        let signature = Signature::try_from_base64(&signature)?;
 
         Ok(SignedMessage {
             inner: TrusteeMessage::Info { info: self },
@@ -101,9 +99,12 @@ pub enum Response {
     PublicKey(SigningPubKey),
     ResultSet(Vec<SignedMessage>),
     Ciphertexts(Vec<Vec<Ciphertext>>),
-    DecryptShares(Vec<Vec<(Uuid, Vec<u8>, Vec<DecryptShare>)>>),
-    Idents(Vec<(VoterId, Commitment, Commitment)>),
-    PetCommits(HashMap<Uuid, TrusteeMessage>),
+    DecryptShares(Vec<Vec<SignedDecryptShareSet>>),
+    Idents(Vec<VoterIdent>),
+    PetCommits(HashMap<Uuid, HashMap<VoterId, (Signature, CtCommitment, CtCommitment)>>),
+    PetOpenings(HashMap<Uuid, HashMap<VoterId, SignedPetOpening>>),
+    PetDecryptions(HashMap<Uuid, HashMap<VoterId, SignedPetDecryptShare>>),
+    Count(i64),
     Outcome(bool),
     Ok,
     SessionExists,

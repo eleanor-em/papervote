@@ -153,12 +153,15 @@ pub struct Ballot {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct VoterIdent {
+    pub id: VoterId,
+    pub c_a: Commitment,
+    pub c_b: Commitment,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum VoterMessage {
-    InitialCommit {
-        voter_id: VoterId,
-        c_a: Commitment,
-        c_b: Commitment,
-    },
+    InitialCommit(VoterIdent),
     EcCommit {
         voter_id: VoterId,
         enc_mac: Ciphertext,
@@ -171,7 +174,7 @@ pub enum VoterMessage {
 
 #[cfg(test)]
 mod tests {
-    use crate::vote::VoterId;
+    use crate::voter::VoterId;
     use std::convert::TryFrom;
 
     #[test]

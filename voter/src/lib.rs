@@ -10,7 +10,7 @@ use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
-use common::vote::{VoterMessage, VoterId, Vote, Ballot};
+use common::voter::{VoterMessage, VoterId, Vote, Ballot, VoterIdent};
 use common::net::{WrappedResponse, Response};
 use cryptid::commit::PedersenCtx;
 
@@ -93,10 +93,11 @@ impl Voter {
         let c_a = self.commit_ctx.commit(&self.a.into(), &self.r_a.into());
         let c_b = self.commit_ctx.commit(&self.b.into(), &self.r_b.into());
 
-        let msg = VoterMessage::InitialCommit {
-            voter_id: self.voter_id.clone(),
-            c_a, c_b,
-        };
+        let msg = VoterMessage::InitialCommit(VoterIdent {
+            id: self.voter_id.clone(),
+            c_a,
+            c_b
+        });
 
 
         let client = reqwest::Client::new();
@@ -221,5 +222,56 @@ impl Voter {
             prf_know_mac,
             prf_know_vote,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext, CurveElem};
+    use crate::Voter;
+    use cryptid::commit::PedersenCtx;
+    use common::voter::{Vote, Candidate};
+    use uuid::Uuid;
+    use cryptid::{AsBase64, Scalar};
+
+    #[test]
+    fn test_mac_recons() {
+        let session_id = Uuid::new_v4();
+        let ctx = CryptoContext::new().unwrap();
+        let secret_key = ctx.random_scalar();
+        let pubkey = PublicKey::new(ctx.g_to(&secret_key));
+        let voter_id = "hello world".to_string();
+        let commit_ctx = PedersenCtx::new(&[0]);
+
+        let mut voter = Voter::new(session_id, pubkey, ctx.clone(), commit_ctx, voter_id).unwrap();
+        let mut vote = Vote::new();
+        vote.set(&Candidate::new("alice", 0), 0);
+        vote.set(&Candidate::new("bob", 1), 1);
+        vote.set(&Candidate::new("charlie", 2), 2);
+        voter.set_vote(vote);
+
+        let vote = voter.get_encoded_vote().unwrap();
+        let a: Scalar = voter.a.into();
+        let b: Scalar = voter.b.into();
+        let mac = a * vote + b;
+
+        let r = ctx.random_scalar();
+        let enc_vote = pubkey.encrypt(&ctx, &ctx.g_to(&vote), &r);
+
+        let r = ctx.random_scalar();
+        let enc_mac = pubkey.encrypt(&ctx, &ctx.g_to(&mac), &r);
+
+        let r = ctx.random_scalar();
+        let enc_b = pubkey.encrypt(&ctx, &ctx.g_to(&b), &r);
+
+        let received_mac = enc_vote.scaled(&a).add(&enc_b);
+
+        assert_eq!(received_mac.decrypt(&secret_key).as_base64(), ctx.g_to(&mac).as_base64());
+
+        let mac_ct = Ciphertext {
+            c1: received_mac.c1 - enc_mac.c1,
+            c2: received_mac.c2 - enc_mac.c2,
+        };
+        assert_eq!(mac_ct.decrypt(&secret_key).as_base64(), CurveElem::identity().as_base64());
     }
 }

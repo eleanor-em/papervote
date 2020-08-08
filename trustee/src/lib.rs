@@ -1,4 +1,5 @@
 #![feature(async_closure)]
+
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Formatter, Display};
@@ -8,11 +9,11 @@ use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext, CurveElem};
 use cryptid::threshold::{Threshold, ThresholdParty, Decryption, PubkeyProof};
 use cryptid::AsBase64;
 use reqwest::Client;
-use reqwest::multipart::{Form, Part};
 use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
+use serde::{Serialize, Deserialize};
 use common::sign::{SignedMessage, SigningKeypair};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
@@ -21,12 +22,13 @@ use cryptid::zkp::{PrfKnowDlog, PrfEqDlogs};
 use std::sync::{Arc, Mutex};
 use futures::future::AbortHandle;
 use common::net::{TrusteeMessage, TrusteeInfo, Response, WrappedResponse};
-use common::vote::{VoterMessage, Candidate, VoterId, Ballot, Vote};
-use cryptid::commit::{PedersenCtx, Commitment};
+use common::voter::{VoterMessage, Candidate, VoterId, Ballot, Vote};
+use cryptid::commit::{PedersenCtx, CtCommitment};
 use cryptid::shuffle::Shuffle;
 use rayon::prelude::*;
 use std::convert::TryFrom;
 use crate::gen::GeneratingTrustee;
+use common::trustee::{CtOpening, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare};
 
 mod api;
 mod gen;
@@ -42,6 +44,8 @@ pub enum TrusteeError {
     FailedResponse(Response),
     InvalidSignature,
     InvalidResponse,
+    InvalidOpening,
+    InvalidProof,
     MissingRegistration,
     MissingCommitment,
     MissingSignature,
@@ -80,7 +84,8 @@ impl From<reqwest::Error> for TrusteeError {
 
 impl Error for TrusteeError {}
 
-struct PetInstance {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PetInstance {
     voter_id: VoterId,
     enc_mac: Ciphertext,
     enc_vote: Ciphertext,
@@ -92,13 +97,13 @@ struct PetInstance {
 pub struct PetData {
     voter_id: VoterId,
     vote_ct: Ciphertext,
-    vote_r: (Scalar, Scalar),
     mac_ct: Ciphertext,
-    mac_r: (Scalar, Scalar),
+    vote_opening: CtOpening,
+    mac_opening: CtOpening,
     vote_proof: PrfEqDlogs,
     mac_proof: PrfEqDlogs,
-    vote_commit: (Commitment, Commitment),
-    mac_commit: (Commitment, Commitment),
+    vote_commit: CtCommitment,
+    mac_commit: CtCommitment,
 }
 
 pub struct Trustee {
@@ -223,6 +228,8 @@ impl Trustee {
         self.info.index
     }
 
+    pub fn id(&self) -> &Uuid { &self.info.id }
+
     pub fn log(&self) -> String {
         let hasher = self.log.clone();
         base64::encode(&hasher.finish_vec())
@@ -239,7 +246,7 @@ impl Trustee {
     pub async fn close_votes(&self, expected: usize) -> Result<(), TrusteeError> {
         let mut count = 0;
         loop {
-            let current = self.received_votes.lock().unwrap().len() ;
+            let current = self.received_votes.lock().unwrap().len();
             if count >= 5 || current >= expected {
                 break;
             }
@@ -270,12 +277,12 @@ impl Trustee {
         }
     }
 
-    pub fn receive_voter_data(&mut self, candidates: Arc<HashMap<usize, Candidate>>)  {
+    pub fn receive_voter_data(&mut self, candidates: Arc<HashMap<usize, Candidate>>) {
         let (future, handle) = futures::future::abortable(Self::receive_voter_data_task(
             self.info.clone(),
             self.failed_voter_ids.clone(),
             self.received_votes.clone(),
-            candidates
+            candidates,
         ));
         self.abort_handle = Some(handle);
         tokio::spawn(future);
@@ -315,12 +322,12 @@ impl Trustee {
                             enc_mac,
                             enc_vote,
                             prf_know_mac,
-                            prf_know_vote
+                            prf_know_vote,
                         ).await {
                             eprintln!("#{}: error handling commit: {}", info.index, e);
                         }
                     })());
-                },
+                }
                 VoterMessage::Ballot(ballot) => {
                     tokio::spawn((async move || {
                         if let Err(e) = Self::handle_ballot(
@@ -328,15 +335,15 @@ impl Trustee {
                             failed_voter_ids.clone(),
                             received_votes.clone(),
                             candidates.clone(),
-                            ballot
+                            ballot,
                         ).await {
                             eprintln!("#{}: error handling ballot: {}", info.index, e);
                         }
                     })());
-                },
+                }
                 _ => {
                     eprintln!("#{}: unrecognised message", info.index);
-                },
+                }
             }
         }
 
@@ -410,7 +417,7 @@ impl Trustee {
             None => {
                 eprintln!("#{}: invalid vote encoding", info.index);
                 return Ok(());
-            },
+            }
             Some(_vote) => {
                 // println!("#{}: received vote:\n{}", info.index, vote.pretty());
             }
@@ -438,10 +445,17 @@ impl Trustee {
 
         // Construct message
         let inner = TrusteeMessage::EcVote {
-            vote, enc_vote, prf_enc_vote, enc_id, enc_a, enc_b, enc_r_a, enc_r_b
+            vote,
+            enc_vote,
+            prf_enc_vote,
+            enc_id,
+            enc_a,
+            enc_b,
+            enc_r_a,
+            enc_r_b,
         };
         let data = serde_json::to_string(&inner)?.as_bytes().to_vec();
-        let signature = info.signing_keypair.sign(&data).as_ref().to_vec();
+        let signature = info.signing_keypair.sign(&data);
 
         let msg = SignedMessage {
             inner,
@@ -472,8 +486,6 @@ impl Trustee {
             return Err(TrusteeError::FailedResponse(response.msg));
         }
 
-        println!("#{}: Votes downloaded", self.info.index);
-
         let votes = match response.msg {
             Response::Ciphertexts(cts) => cts,
             _ => {
@@ -484,9 +496,7 @@ impl Trustee {
         let mut ctx = self.info.ctx.clone();
         let (commit_ctx, generators) = PedersenCtx::with_generators(self.info.session_id.as_bytes(), votes.len());
         let shuffle = Shuffle::new(ctx.clone(), votes.to_vec(), &self.info.pubkey)?;
-        println!("#{}: Shuffled", self.info.index);
         let proof = shuffle.gen_proof(&mut ctx, &commit_ctx, &generators, &self.info.pubkey)?;
-        println!("#{}: Generated proof", self.info.index);
 
         let outputs = shuffle.outputs().to_vec();
         let mut enc_votes = Vec::new();
@@ -507,7 +517,6 @@ impl Trustee {
 
         // send shuffle
         api::post_shuffle(&self.info, enc_votes, enc_voter_ids, enc_as, enc_bs, enc_r_as, enc_r_bs, proof).await?;
-        println!("#{}: Uploaded shuffle", self.info.index);
         Ok(())
     }
 
@@ -537,13 +546,10 @@ impl Trustee {
             row_shares
         }));
 
-        let signatures = decrypt_shares.iter().map(|shares| {
-            let string = shares.iter()
-                .map(|share| serde_json::to_string(share).unwrap())
-                .collect::<Vec<_>>()
-                .join(":");
-            self.info.signing_keypair.sign(string.as_bytes()).as_ref().to_vec()
-        }).collect();
+        let mut signatures = Vec::new();
+        signatures.par_extend(decrypt_shares.par_iter().map(|shares| {
+            SignedDecryptShareSet::new(self.info.id.clone(), &self.info.signing_keypair, shares.to_vec()).signature
+        }));
 
         api::post_decrypt_shares(&self.info, signatures, decrypt_shares).await?;
 
@@ -552,7 +558,7 @@ impl Trustee {
 
     async fn decrypt_votes(&self, votes: &[Vec<Ciphertext>]) -> Result<Vec<Vec<CurveElem>>, TrusteeError> {
         // Download decryption shares
-        let decrypt_shares = api::get_decrypt_shares(&self.info).await?;
+        let decrypt_shares = api::get_decrypt_shares(&self.trustee_info, &self.info).await?;
 
         // Perform decryption using the posted shares
         let mut rows = Vec::new();
@@ -564,10 +570,10 @@ impl Trustee {
                 Decryption::new(self.party.min_trustees(), &self.info.ctx, &vote[4]),
                 Decryption::new(self.party.min_trustees(), &self.info.ctx, &vote[5])
             ];
-            for (trustee_id, _, these_shares) in shares {
-                let info = &self.trustee_info[&trustee_id];
+            for share_set in shares {
+                let info = &self.trustee_info[&share_set.trustee_id];
 
-                for (dec, share) in decryptions.iter_mut().zip(these_shares) {
+                for (dec, share) in decryptions.iter_mut().zip(share_set.shares) {
                     dec.add_share(info.index, &info.pubkey_proof.as_ref().unwrap(), &share);
                 }
             }
@@ -577,7 +583,7 @@ impl Trustee {
                 .collect::<Result<Vec<_>, _>>() {
                 Ok(results) => {
                     rows.push(results);
-                },
+                }
                 Err(e) => {
                     eprintln!("Decryption failed for a vote: {}", e);
                 }
@@ -587,7 +593,7 @@ impl Trustee {
         Ok(rows)
     }
 
-    pub async fn validate_votes(&mut self) -> Result<Vec<PetData>, TrusteeError> {
+    pub async fn validate_votes(&mut self) -> Result<Vec<PetInstance>, TrusteeError> {
         self.download_votes().await?;
         let votes = self.downloaded_votes.as_ref().unwrap();
         let decrypted = self.decrypt_votes(&votes).await?;
@@ -614,10 +620,10 @@ impl Trustee {
         // Get commitments
         let ec_commits = api::get_ec_commitments(&self.info).await?;
         let mut ec_commit_map = HashMap::new();
-        for (voter_id, enc_mac, enc_vote) in ec_commits {
-            ec_commit_map.entry(voter_id)
+        for commit in ec_commits {
+            ec_commit_map.entry(commit.voter_id)
                 .or_insert(Vec::new())
-                .push((enc_mac, enc_vote));
+                .push((commit.enc_mac, commit.enc_vote));
         }
 
         // Check uniqueness of IDs and EC commitments
@@ -628,104 +634,115 @@ impl Trustee {
         // Get idents
         let idents = api::get_idents(&self.info).await?;
         let mut ident_map = HashMap::new();
-        for (voter_id, c_a, c_b) in idents {
-            ident_map.entry(voter_id)
+        for ident in idents {
+            ident_map.entry(ident.id)
                 .or_insert(Vec::new())
-                .push((c_a, c_b));
+                .push((ident.c_a, ident.c_b));
         }
 
         // Verify the commitments from the voter and EC to produce a set of votes for PETing
-        let mut to_pet: Vec<PetInstance> = Vec::new();
+        let mut to_pet: Vec<Option<PetInstance>> = Vec::new();
+        to_pet.par_extend(unique_rows.into_par_iter()
+            .zip(votes)
+            .map(|((voter_id, a, b, r_a, r_b), vote)| {
+                if let Some(commits) = ident_map.get(&voter_id) {
+                    if let Some(ec_commits) = ec_commit_map.get(&voter_id) {
+                        let voter_id_copy = voter_id.clone();
+                        // Only take the first EC commitment as valid; this is one of many possible policies
+                        let (enc_mac, enc_vote) = ec_commits[0].clone();
 
-        for (i, (voter_id, a, b, r_a, r_b)) in unique_rows.into_iter().enumerate() {
-            if let Some(commits) = ident_map.get(&voter_id) {
-                if let Some(ec_commits) = ec_commit_map.get(&voter_id) {
-                    let voter_id_copy = voter_id.clone();
-                    let (enc_mac, enc_vote) = ec_commits[0].clone();
-
-                    let mut matched = false;
-                    for (c_a, c_b) in commits {
-                        if c_a.validate(&self.info.commit_ctx, &a.into(), &r_a.into())
+                        // Check the voter commitment
+                        for (c_a, c_b) in commits {
+                            if c_a.validate(&self.info.commit_ctx, &a.into(), &r_a.into())
                                 && c_b.validate(&self.info.commit_ctx, &b.into(), &r_b.into()) {
-                            // Commitments validated
-                            let enc_received_vote = votes[i][0].clone();
-                            to_pet.push(PetInstance {
-                                voter_id, enc_mac, enc_vote, enc_received_vote,
-                                a: a.into(), b: b.into()
-                            });
-                            matched = true;
-                            break;
+                                // Commitments validated
+                                let enc_received_vote = vote[0].clone();
+                                return Some(PetInstance {
+                                    voter_id,
+                                    enc_mac,
+                                    enc_vote,
+                                    enc_received_vote,
+                                    a: a.into(),
+                                    b: b.into(),
+                                });
+                            }
                         }
-                    }
 
-                    if !matched {
                         eprintln!("No valid commitment for {}.", voter_id_copy);
+                    } else {
+                        eprintln!("No EC commitment for {}.", voter_id);
                     }
                 } else {
-                    eprintln!("No EC commitment for {}.", voter_id);
+                    eprintln!("No commitment for {}.", voter_id);
                 }
-            } else {
-                eprintln!("No commitment for {}.", voter_id);
-            }
-        }
 
-        println!("Vote validation and matching done, {} votes need to be PET'd.", to_pet.len());
+                None
+            }));
 
-        Ok(self.do_pet_commits(to_pet).await?)
+        let to_pet: Vec<PetInstance> = to_pet.into_iter()
+            .filter(|opt| opt.is_some())
+            .map(|opt| opt.unwrap())
+            .collect();
+
+        println!("{} votes validated.", to_pet.len());
+
+        Ok(to_pet)
     }
 
-    async fn do_pet_commits(&self, to_test: Vec<PetInstance>) -> Result<Vec<PetData>, TrusteeError> {
+    pub async fn do_pet_commits(&self, pet_instances: Vec<PetInstance>) -> Result<Vec<PetData>, TrusteeError> {
         let mut data = Vec::new();
-        data.par_extend(to_test.into_par_iter().map(|test| {
+        for test in pet_instances {
             // Construct vote commitment
-            let vote_quotient_c1 = test.enc_received_vote.c1 - test.enc_vote.c1;
-            let vote_quotient_c2 = test.enc_received_vote.c2 - test.enc_vote.c2;
             let vote_ct = Ciphertext {
-                c1: vote_quotient_c1, c2: vote_quotient_c2
+                c1: test.enc_received_vote.c1 - test.enc_vote.c1,
+                c2: test.enc_received_vote.c2 - test.enc_vote.c2,
             };
 
             let blind = self.info.ctx.random_scalar();
-            let vote_blind = (vote_quotient_c1.scaled(&blind), vote_quotient_c2.scaled(&blind));
-            let vote_r = (self.info.ctx.random_scalar(), self.info.ctx.random_scalar());
-            let vote_commit = (self.info.commit_ctx.commit(&vote_blind.0.into(), &vote_r.0),
-                               self.info.commit_ctx.commit(&vote_blind.1.into(), &vote_r.1));
+            let vote_blind = vote_ct.scaled(&blind);
+            let vote_rs = (self.info.ctx.random_scalar(), self.info.ctx.random_scalar());
+            let vote_commit = self.info.commit_ctx.commit_ct(&vote_blind, &vote_rs);
 
-            let vote_proof = PrfEqDlogs::new(&self.info.ctx, &vote_quotient_c1, &vote_quotient_c2, &vote_blind.0, &vote_blind.1, &blind);
+            let vote_proof = PrfEqDlogs::new(&self.info.ctx, &vote_ct.c1, &vote_ct.c2, &vote_blind.c1, &vote_blind.c2, &blind);
             assert!(vote_proof.verify());
 
             // Reconstruct the MAC
-            let enc_b = self.info.pubkey.encrypt(&self.info.ctx, &test.b, &Scalar::zero());
-            let mac_c1 = test.enc_vote.c1.scaled(&test.a.into()) + enc_b.c1;
-            let mac_c2 = test.enc_vote.c2.scaled(&test.a.into()) + enc_b.c2;
-
-            // Construct MAC commitment
-            let mac_quotient_c1 = test.enc_mac.c1 - mac_c1;
-            let mac_quotient_c2 = test.enc_mac.c2 - mac_c2;
+            let enc_b = self.info.pubkey.encrypt(&self.info.ctx, &self.info.ctx.g_to(&test.b.into()), &Scalar::zero());
+            let received_mac = test.enc_vote.scaled(&test.a.into()).add(&enc_b);
             let mac_ct = Ciphertext {
-                c1: mac_quotient_c1, c2: mac_quotient_c2
+                c1: received_mac.c1 - test.enc_mac.c1,
+                c2: received_mac.c2 - test.enc_mac.c2,
             };
 
+            // Construct MAC commitment
             let blind = self.info.ctx.random_scalar();
-            let mac_blind = (mac_quotient_c1.scaled(&blind), mac_quotient_c2.scaled(&blind));
-            let mac_r = (self.info.ctx.random_scalar(), self.info.ctx.random_scalar());
-            let mac_commit = (self.info.commit_ctx.commit(&mac_blind.0.into(), &mac_r.0),
-                              self.info.commit_ctx.commit(&mac_blind.1.into(), &mac_r.1));
+            let mac_blind = mac_ct.scaled(&blind);
+            let mac_rs = (self.info.ctx.random_scalar(), self.info.ctx.random_scalar());
+            let mac_commit = self.info.commit_ctx.commit_ct(&mac_blind, &mac_rs);
 
-            let mac_proof = PrfEqDlogs::new(&self.info.ctx, &mac_quotient_c1, &mac_quotient_c2, &mac_blind.0, &mac_blind.1, &blind);
+            let mac_proof = PrfEqDlogs::new(&self.info.ctx, &mac_ct.c1, &mac_ct.c2, &mac_blind.c1, &mac_blind.c2, &blind);
             assert!(mac_proof.verify());
 
-            PetData {
+            data.push(PetData {
                 voter_id: test.voter_id,
                 vote_ct,
-                vote_r,
                 mac_ct,
-                mac_r,
+                vote_opening: CtOpening {
+                    ct: vote_blind,
+                    r1: vote_rs.0,
+                    r2: vote_rs.1,
+                },
+                mac_opening: CtOpening {
+                    ct: mac_blind,
+                    r1: mac_rs.0,
+                    r2: mac_rs.1,
+                },
                 vote_proof,
                 mac_proof,
                 vote_commit,
                 mac_commit,
-            }
-        }));
+            });
+        }
 
         // Post commitments
         self.post_pet_commitments(&data).await?;
@@ -746,12 +763,9 @@ impl Trustee {
 
             let mut bytes = Vec::new();
             bytes.extend_from_slice(voter_id.to_string().as_bytes());
-            bytes.extend_from_slice(vote_commit.0.to_string().as_bytes());
-            bytes.extend_from_slice(vote_commit.1.to_string().as_bytes());
-            bytes.extend_from_slice(mac_commit.0.to_string().as_bytes());
-            bytes.extend_from_slice(mac_commit.1.to_string().as_bytes());
-
-            let signature = self.info.signing_keypair.sign(&bytes).as_ref().to_vec();
+            bytes.extend_from_slice(vote_commit.to_string().as_bytes());
+            bytes.extend_from_slice(mac_commit.to_string().as_bytes());
+            let signature = self.info.signing_keypair.sign(&bytes);
 
             voter_ids.push(voter_id);
             vote_commits.push(vote_commit);
@@ -764,7 +778,179 @@ impl Trustee {
         Ok(())
     }
 
-    pub async fn do_pet_openings(&self, data: Vec<PetData>) -> Result<(), TrusteeError> {
+    pub async fn do_pet_openings(&self, data: Vec<PetData>) -> Result<HashMap<VoterId, (Ciphertext, Ciphertext)>, TrusteeError> {
+        let mut records = HashMap::new();
+
+        // Check that all commitments are available
+        // TODO: This is a bit clunky because we want to allow the threshold to do it, but what happens
+        // TODO: if more trustee commitments get posted after we posted our openings? Should post openings\
+        // TODO: with the number of trustees we assumed existed at the time. Maybe we should cache the
+        // TODO: commitments we saw here as well.
+        if api::count_pet_commits(&self.info).await? >= self.party.min_trustees() as i64 * data.len() as i64 {
+            let mut openings = Vec::new();
+            let mut voter_ids = Vec::new();
+
+            for row in data {
+                openings.push(SignedPetOpening::new(&self.info.signing_keypair,
+                                                    &row.voter_id,
+                                                    row.vote_opening,
+                                                    row.mac_opening,
+                                                    row.vote_proof,
+                                                    row.mac_proof));
+                voter_ids.push(row.voter_id.clone());
+                records.entry(row.voter_id)
+                    .or_insert((row.vote_ct, row.mac_ct));
+            }
+
+            api::post_pet_openings(&self.info, voter_ids, openings).await?;
+        }
+
+        Ok(records)
+    }
+
+    pub async fn do_pet_decryptions(&self, data: HashMap<VoterId, (Ciphertext, Ciphertext)>) -> Result<HashMap<VoterId, (Ciphertext, Ciphertext)>, TrusteeError> {
+        let mut commits = api::get_pet_commits(&self.trustee_info, &self.info).await?;
+        let mut openings = api::get_pet_openings(&self.trustee_info, &self.info).await?;
+
+        let mut voter_id_validations = HashMap::new();
+        let mut combined_vote_cts = HashMap::new();
+        let mut combined_mac_cts = HashMap::new();
+
+        for trustee in self.trustee_info.keys() {
+            let mut these_commits = commits.remove(trustee).unwrap();
+            let these_openings = openings.remove(trustee).unwrap();
+
+            for (voter_id, opening) in these_openings {
+                let (vote_commit, mac_commit) = these_commits.remove(&voter_id)
+                    .ok_or(TrusteeError::MissingCommitment)?;
+                if let Some((vote_ct, mac_ct)) = data.get(&voter_id) {
+                    // Check the commitment openings
+                    if !vote_commit.validate(
+                        &self.info.commit_ctx,
+                        &opening.vote_opening.ct,
+                        (&opening.vote_opening.r1, &opening.vote_opening.r2)) {
+                        eprintln!("Voter {} from trustee {}: vote PET commitment opening failed", voter_id, trustee);
+                        continue;
+                    }
+                    if !mac_commit.validate(
+                        &self.info.commit_ctx,
+                        &opening.mac_opening.ct,
+                        (&opening.mac_opening.r1, &opening.mac_opening.r2)) {
+                        eprintln!("Voter {} from trustee {}: MAC PET commitment opening failed", voter_id, trustee);
+                        continue;
+                    }
+
+                    // Check the proofs
+                    if !(opening.vote_proof.verify()
+                        && opening.vote_proof.base1 == vote_ct.c1
+                        && opening.vote_proof.base2 == vote_ct.c2
+                        && opening.vote_proof.result1 == opening.vote_opening.ct.c1
+                        && opening.vote_proof.result2 == opening.vote_opening.ct.c2) {
+                        eprintln!("Voter {} from trustee {}: vote PET proof failed", voter_id, trustee);
+                        continue;
+                    }
+                    if !(opening.mac_proof.verify()
+                        && opening.mac_proof.base1 == mac_ct.c1
+                        && opening.mac_proof.base2 == mac_ct.c2
+                        && opening.mac_proof.result1 == opening.mac_opening.ct.c1
+                        && opening.mac_proof.result2 == opening.mac_opening.ct.c2) {
+                        eprintln!("Voter {} from trustee {}: MAC PET proof failed", voter_id, trustee);
+                        continue;
+                    }
+
+                    *voter_id_validations.entry(voter_id.clone())
+                        .or_insert(0usize) += 1;
+
+                    // Add in this part of the ciphertexts
+                    let vote_ct_part = combined_vote_cts.entry(voter_id.clone())
+                        .or_insert(Ciphertext::identity());
+                    let vote_ct_part = vote_ct_part.add(&opening.vote_opening.ct);
+                    combined_vote_cts.insert(voter_id.clone(), vote_ct_part);
+
+                    let mac_ct_part = combined_mac_cts.entry(voter_id.clone())
+                        .or_insert(Ciphertext::identity());
+                    let mac_ct_part = mac_ct_part.add(&opening.mac_opening.ct);
+                    combined_mac_cts.insert(voter_id.clone(), mac_ct_part);
+                } else {
+                    eprintln!("Voter {} missing from trustee {}", voter_id, trustee);
+                }
+            }
+        }
+
+        // Filter by voters with validated commitments and proofs
+        let valid_voters = voter_id_validations.into_iter()
+            .filter(|(_, count)| *count >= self.party.min_trustees())
+            .map(|(voter_id, _)| voter_id);
+
+        // Create decryption shares
+        let mut shares = Vec::new();
+        let mut voter_ids = Vec::new();
+        let mut ciphertexts = HashMap::new();
+
+        for voter_id in valid_voters {
+            let combined_vote_ct = combined_vote_cts.remove(&voter_id).unwrap();
+            let combined_mac_ct = combined_mac_cts.remove(&voter_id).unwrap();
+            let vote_share = self.party.decrypt_share(&combined_vote_ct);
+            let mac_share = self.party.decrypt_share(&combined_mac_ct);
+
+            shares.push(SignedPetDecryptShare::new(&self.info.signing_keypair, &voter_id, vote_share, mac_share));
+            voter_ids.push(voter_id.clone());
+            ciphertexts.insert(voter_id, (combined_vote_ct, combined_mac_ct));
+        }
+
+        // Post decryption shares
+        api::post_pet_decryptions(&self.info, voter_ids, shares).await?;
+
+        Ok(ciphertexts)
+    }
+
+    pub async fn finish_pets(&self, ciphertexts: HashMap<VoterId, (Ciphertext, Ciphertext)>) -> Result<(), TrusteeError> {
+        let pet_decryptions = api::get_pet_decryptions(&self.trustee_info, &self.info).await?;
+
+        let mut decryptions = HashMap::new();
+
+        for (trustee, share_row) in pet_decryptions {
+            for (voter_id, shares) in share_row {
+                if !decryptions.contains_key(&voter_id) {
+                    let vote_decrypt = Decryption::new(self.party.min_trustees(),
+                                                       &self.info.ctx,
+                                                       &ciphertexts[&voter_id].0);
+                    let mac_decrypt = Decryption::new(self.party.min_trustees(),
+                                                       &self.info.ctx,
+                                                       &ciphertexts[&voter_id].1);
+                    decryptions.insert(voter_id.clone(), (vote_decrypt, mac_decrypt));
+                }
+
+                let (vote_decrypt, mac_decrypt) = decryptions.get_mut(&voter_id).unwrap();
+                vote_decrypt.add_share(self.trustee_info[&trustee].index, self.trustee_info[&trustee].pubkey_proof.as_ref().unwrap(), &shares.vote_share);
+                mac_decrypt.add_share(self.trustee_info[&trustee].index, self.trustee_info[&trustee].pubkey_proof.as_ref().unwrap(), &shares.mac_share);
+            }
+        }
+
+        let mut validated_voter_ids = Vec::new();
+        for (voter_id, (vote_decrypt, mac_decrypt)) in decryptions {
+            if let Ok(vote_pet) = vote_decrypt.finish() {
+                if let Ok(mac_pet) = mac_decrypt.finish() {
+                    if vote_pet == CurveElem::identity() && mac_pet == CurveElem::identity() {
+                        validated_voter_ids.push(voter_id);
+                    } else {
+                        eprintln!("PET failed for {}\n\tvote: {}\n\tmac:  {}", voter_id, vote_pet.as_base64(), mac_pet.as_base64());
+                    }
+                } else {
+                    eprintln!("MAC PET decrypt failed for {}", voter_id);
+                }
+            } else {
+                eprintln!("Vote PET decrypt failed for {}", voter_id);
+            }
+        }
+
+        println!("{} votes passed all tests.", validated_voter_ids.len());
+
+        let enc_votes: Vec<Ciphertext> = self.downloaded_votes.as_ref().unwrap()
+            .iter()
+            .map(|row| row[0].clone())
+            .collect();
+
         Ok(())
     }
 }

@@ -10,12 +10,13 @@ use uuid::Uuid;
 
 use common::APP_NAME;
 use common::config::PapervoteConfig;
-use common::sign::{SignedMessage, SigningPubKey};
+use common::sign::{SignedMessage, SigningPubKey, Signature};
 use common::net::{TrusteeMessage, TrusteeInfo};
-use common::vote::VoterId;
-use cryptid::commit::Commitment;
+use common::voter::{VoterId, VoterIdent};
+use cryptid::commit::{Commitment, CtCommitment};
 use cryptid::shuffle::ShuffleProof;
 use std::collections::HashMap;
+use common::trustee::{EcCommit, CtOpening, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare};
 use cryptid::zkp::PrfEqDlogs;
 
 #[derive(Debug)]
@@ -190,6 +191,31 @@ impl DbClient {
                 signature       TEXT UNIQUE NOT NULL,
                 CONSTRAINT      unique_wbb_pet_commits UNIQUE(session, trustee, voter_id)
             );
+            CREATE TABLE IF NOT EXISTS wbb_pet_openings (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                trustee         UUID NOT NULL,
+                voter_id        TEXT NOT NULL,
+                vote_ct         TEXT UNIQUE NOT NULL,
+                vote_r1         TEXT UNIQUE NOT NULL,
+                vote_r2         TEXT UNIQUE NOT NULL,
+                mac_ct          TEXT UNIQUE NOT NULL,
+                mac_r1          TEXT UNIQUE NOT NULL,
+                mac_r2          TEXT UNIQUE NOT NULL,
+                vote_proof      TEXT UNIQUE NOT NULL,
+                mac_proof       TEXT UNIQUE NOT NULL,
+                signature       TEXT UNIQUE NOT NULL,
+                CONSTRAINT      unique_wbb_pet_openings UNIQUE(session, trustee, voter_id)
+            );
+            CREATE TABLE IF NOT EXISTS wbb_pet_decryptions (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                trustee         UUID NOT NULL,
+                voter_id        TEXT NOT NULL,
+                vote_share      TEXT NOT NULL UNIQUE,
+                mac_share       TEXT NOT NULL UNIQUE,
+                signature       TEXT UNIQUE NOT NULL
+            );
         ").await?;
 
         Ok(())
@@ -208,7 +234,7 @@ impl DbClient {
         }
     }
 
-    pub async fn insert_trustee(&self, session: &Uuid, uuid: &Uuid, pubkey: &SigningPubKey, index: usize, address: &str, signature: &[u8]) -> Result<(), DbError> {
+    pub async fn insert_trustee(&self, session: &Uuid, uuid: &Uuid, pubkey: &SigningPubKey, index: usize, address: &str, signature: &Signature) -> Result<(), DbError> {
         let result = self.client.execute("
             INSERT INTO trustees(session, uuid, pubkey, index, address, signature)
             VALUES($1, $2, $3, $4, $5, $6);
@@ -218,7 +244,7 @@ impl DbClient {
             &pubkey.to_string(),
             &(index as i16),
             &address.to_string(),
-            &base64::encode(signature)
+            &signature.as_base64()
         ]).await?;
 
         if result > 0 {
@@ -227,8 +253,8 @@ impl DbClient {
             Err(DbError::InsertAlreadyExists)
         }
     }
-    
-    pub async fn insert_commitment(&self, session: &Uuid, trustee: &Uuid, commitment: &KeygenCommitment, signature: &[u8]) -> Result<(), DbError> {
+
+    pub async fn insert_commitment(&self, session: &Uuid, trustee: &Uuid, commitment: &KeygenCommitment, signature: &Signature) -> Result<(), DbError> {
         let result = self.client.execute("
             INSERT INTO keygen_commitments(session, trustee, commitment, signature)
             VALUES($1, $2, $3, $4);
@@ -236,7 +262,7 @@ impl DbClient {
             &session,
             &trustee,
             &commitment.to_string(),
-            &base64::encode(signature)
+            &signature.as_base64()
         ]).await?;
 
         if result > 0 {
@@ -246,7 +272,7 @@ impl DbClient {
         }
     }
 
-    pub async fn insert_pubkey_sig(&self, session: &Uuid, trustee: &Uuid, pubkey: &PublicKey, pubkey_proof: &PubkeyProof, signature: &[u8]) -> Result<(), DbError> {
+    pub async fn insert_pubkey_sig(&self, session: &Uuid, trustee: &Uuid, pubkey: &PublicKey, pubkey_proof: &PubkeyProof, signature: &Signature) -> Result<(), DbError> {
         // For conflicts, don't worry because we only care about the signatures
         self.client.execute("
             INSERT INTO parameters(session, pubkey)
@@ -261,7 +287,7 @@ impl DbClient {
             &session,
             &trustee,
             &pubkey_proof.as_base64(),
-            &base64::encode(signature)
+            &signature.as_base64()
         ]).await?;
 
         if result > 0 {
@@ -271,16 +297,11 @@ impl DbClient {
         }
     }
 
-    pub async fn insert_ident(&self,
-                              session: &Uuid,
-                              voter_id: VoterId,
-                              c_a: &Commitment,
-                              c_b: &Commitment
-    ) -> Result<(), DbError> {
+    pub async fn insert_ident(&self, session: &Uuid, ident: VoterIdent) -> Result<(), DbError> {
         let result = self.client.execute("
             INSERT INTO wbb_idents(session, voter_id, c_a, c_b)
             VALUES ($1, $2, $3, $4);
-        ", &[session, &voter_id.to_string(), &c_a.to_string(), &c_b.to_string()]).await?;
+        ", &[session, &ident.id.to_string(), &ident.c_a.to_string(), &ident.c_b.to_string()]).await?;
 
         if result > 0 {
             Ok(())
@@ -291,16 +312,15 @@ impl DbClient {
 
     pub async fn insert_ec_commit(&self,
                                   session: &Uuid,
-                                  voter_id: VoterId,
-                                  enc_mac: &Ciphertext,
-                                  enc_vote: &Ciphertext,
                                   signed_by: &Uuid,
-                                  signature: &[u8]
+                                  commit: &EcCommit,
+                                  signature: &Signature,
     ) -> Result<(), DbError> {
         let result = self.client.execute("
             INSERT INTO wbb_commits(session, voter_id, enc_mac, enc_vote, signed_by, signature)
             VALUES ($1, $2, $3, $4, $5, $6);
-        ", &[session, &voter_id.to_string(), &enc_mac.to_string(), &enc_vote.to_string(), signed_by, &base64::encode(signature)]).await?;
+        ", &[session, &commit.voter_id.to_string(), &commit.enc_mac.to_string(),
+            &commit.enc_vote.to_string(), signed_by, &signature.as_base64()]).await?;
 
         if result > 0 {
             Ok(())
@@ -320,12 +340,12 @@ impl DbClient {
                                 enc_r_a: &Ciphertext,
                                 enc_r_b: &Ciphertext,
                                 signed_by: &Uuid,
-                                signature: &[u8]) -> Result<(), DbError> {
+                                signature: &Signature) -> Result<(), DbError> {
         let result = self.client.execute("
             INSERT INTO wbb_votes(session, vote, enc_vote, prf_enc_vote, enc_voter_id, enc_param_a, enc_param_b, enc_param_r_a, enc_param_r_b, signed_by, signature)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
         ", &[session, &vote, &enc_vote.to_string(), &prf_enc_vote.as_base64(), &enc_id.to_string(), &enc_a.to_string(), &enc_b.to_string(),
-            &enc_r_a.to_string(), &enc_r_b.to_string(), signed_by, &base64::encode(signature)]).await?;
+            &enc_r_a.to_string(), &enc_r_b.to_string(), signed_by, &signature.as_base64()]).await?;
 
         if result > 0 {
             Ok(())
@@ -345,23 +365,23 @@ impl DbClient {
                                     enc_r_bs: &[Ciphertext],
                                     proof: &ShuffleProof,
                                     signed_by: &Uuid,
-                                    signature: &[u8]
+                                    signature: &Signature,
     ) -> Result<(), DbError> {
         for i in 0..enc_votes.len() {
             if self.client.execute("
                 INSERT INTO wbb_votes_mix(session, mix_index, index, enc_vote, enc_voter_id, enc_param_a, enc_param_b, enc_param_r_a, enc_param_r_b)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ", &[session, &mix_index, &(i as i32), &enc_votes[i].to_string(),
-                         &enc_voter_ids[i].to_string(), &enc_as[i].to_string(),
-                         &enc_bs[i].to_string(), &enc_r_as[i].to_string(),
-                         &enc_r_bs[i].to_string()]).await? == 0 {
+                &enc_voter_ids[i].to_string(), &enc_as[i].to_string(),
+                &enc_bs[i].to_string(), &enc_r_as[i].to_string(),
+                &enc_r_bs[i].to_string()]).await? == 0 {
                 return Err(DbError::InsertAlreadyExists);
             }
         }
         let result = self.client.execute("
             INSERT INTO wbb_votes_mix_proofs(session, mix_index, proof, signed_by, signature)
             VALUES ($1, $2, $3, $4, $5);
-        ", &[session, &mix_index, &proof.to_string(), signed_by, &base64::encode(signature)]).await?;
+        ", &[session, &mix_index, &proof.to_string(), signed_by, &signature.as_base64()]).await?;
 
         if result > 0 {
             Ok(())
@@ -373,14 +393,14 @@ impl DbClient {
     pub async fn insert_ec_vote_decrypt(&self,
                                         session: &Uuid,
                                         trustee: &Uuid,
-                                        signatures: &[Vec<u8>],
-                                        shares: &[Vec<DecryptShare>]
+                                        signatures: &[Signature],
+                                        shares: &[Vec<DecryptShare>],
     ) -> Result<(), DbError> {
         for i in 0..shares.len() {
             if self.client.execute("
                 INSERT INTO wbb_votes_decrypt(session, index, trustee, signature, share)
                 VALUES ($1, $2, $3, $4, $5);
-            ", &[session, &(i as i32), trustee, &base64::encode(&signatures[i]),
+            ", &[session, &(i as i32), trustee, &&signatures[i].as_base64(),
                 &serde_json::to_string(&shares[i])
                     .map_err(|_| DbError::SchemaFailure("share"))?
             ]).await? == 0 {
@@ -391,28 +411,72 @@ impl DbClient {
         Ok(())
     }
 
-    pub async fn insert_ec_pet_commits(&self,
-                                       session: &Uuid,
-                                       trustee: &Uuid,
-                                       voter_ids: &[VoterId],
-                                       vote_commits: &[(Commitment, Commitment)],
-                                       mac_commits: &[(Commitment, Commitment)],
-                                       signatures: &[Vec<u8>]
+    pub async fn insert_pet_commits(&self,
+                                    session: &Uuid,
+                                    trustee: &Uuid,
+                                    voter_ids: &[VoterId],
+                                    vote_commits: &[CtCommitment],
+                                    mac_commits: &[CtCommitment],
+                                    signatures: &[Signature],
     ) -> Result<(), DbError> {
         for i in 0..signatures.len() {
             if self.client.execute("
-                INSERT INTO wbb_pet_commits(session, trustee, voter_id, vote_commit_1, vote_commit_2, mac_commit_1, mac_commit_2, signature)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
-            ", &[session, trustee, &voter_ids[i].to_string(), &vote_commits[i].0.to_string(),
-                &vote_commits[i].1.to_string(), &mac_commits[i].0.to_string(),
-                &mac_commits[i].1.to_string(), &base64::encode(&signatures[i])])
-            .await? == 0 {
+                INSERT INTO wbb_pet_commits(session, trustee, voter_id, vote_commit, mac_commit, signature)
+                VALUES ($1, $2, $3, $4, $5, $6);
+            ", &[session, trustee, &voter_ids[i].to_string(), &vote_commits[i].to_string(),
+                &mac_commits[i].to_string(), &signatures[i].as_base64()])
+                .await? == 0 {
                 return Err(DbError::InsertAlreadyExists);
             }
         }
 
         Ok(())
+    }
 
+    pub async fn insert_pet_openings(&self,
+                                     session: &Uuid,
+                                     trustee: &Uuid,
+                                     voter_ids: &[VoterId],
+                                     openings: &[SignedPetOpening]
+    ) -> Result<(), DbError> {
+        for i in 0..voter_ids.len() {
+            if self.client.execute("
+                INSERT INTO wbb_pet_openings(session, trustee, voter_id, vote_ct, vote_r1, vote_r2, mac_ct, mac_r1, mac_r2, vote_proof, mac_proof, signature)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ", &[session, trustee, &voter_ids[i].to_string(), &openings[i].vote_opening.ct.to_string(),
+                    &openings[i].vote_opening.r1.as_base64(), &openings[i].vote_opening.r2.as_base64(),
+                    &openings[i].mac_opening.ct.to_string(), &openings[i].mac_opening.r1.as_base64(),
+                    &openings[i].mac_opening.r2.as_base64(),
+                    &serde_json::to_string(&openings[i].vote_proof).unwrap(),
+                    &serde_json::to_string(&openings[i].mac_proof).unwrap(),
+                    &openings[i].signature.as_base64()]).await? == 0 {
+                return Err(DbError::InsertAlreadyExists);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn insert_pet_decrypt(&self,
+                                    session: &Uuid,
+                                    trustee: &Uuid,
+                                    voter_ids: &[VoterId],
+                                    shares: &[SignedPetDecryptShare]
+    ) -> Result<(), DbError> {
+        for i in 0..shares.len() {
+            if self.client.execute("
+                INSERT INTO wbb_pet_decryptions(session, trustee, voter_id, vote_share, mac_share, signature)
+                VALUES ($1, $2, $3, $4, $5, $6);
+            ", &[session, trustee, &voter_ids[i].to_string(),
+                &serde_json::to_string(&shares[i].vote_share).unwrap(),
+                &serde_json::to_string(&shares[i].mac_share).unwrap(),
+                &shares[i].signature.as_base64()
+            ]).await? == 0 {
+                return Err(DbError::InsertAlreadyExists);
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn count_trustees(&self, session: &Uuid) -> Result<usize, DbError> {
@@ -447,7 +511,7 @@ impl DbClient {
             FROM trustees
             WHERE session=$1 AND uuid=$2;
         ", &[&session, &uuid]).await?;
-        
+
         if rows.len() > 0 {
             let row = rows.first().ok_or(DbError::NotEnoughRows)?;
             let pubkey: String = row.get("pubkey");
@@ -460,7 +524,7 @@ impl DbClient {
                 pubkey,
                 pubkey_proof: None, // Assume this isn't being used
                 index: index as usize,
-                address
+                address,
             };
             Ok(info)
         } else {
@@ -489,7 +553,7 @@ impl DbClient {
                 pubkey,
                 pubkey_proof: None,
                 index: index as usize,
-                address
+                address,
             };
             result.push(info.into_signed_msg(signature).map_err(|_| DbError::SchemaFailure("result"))?);
         }
@@ -508,9 +572,11 @@ impl DbClient {
         for row in rows {
             let sender_id: Uuid = row.get("trustee");
             let commitment: String = row.get("commitment");
-            let commitment = commitment.try_into().map_err(|_| DbError::SchemaFailure("commitment"))?;
+            let commitment = commitment.try_into()
+                .map_err(|_| DbError::SchemaFailure("commitment"))?;
             let signature: String = row.get("signature");
-            let signature: Vec<u8> = base64::decode(&signature).map_err(|_| DbError::SchemaFailure("signature"))?;
+            let signature = Signature::try_from_base64(&signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
             let inner = TrusteeMessage::KeygenCommit { commitment };
 
             result.push(SignedMessage {
@@ -541,7 +607,7 @@ impl DbClient {
         for row in rows {
             let sender_id: Uuid = row.get("trustee");
             let signature: String = row.get("signature");
-            let signature: Vec<u8> = base64::decode(&signature)
+            let signature = Signature::try_from_base64(&signature)
                 .map_err(|_| DbError::SchemaFailure("signature"))?;
             let pubkey_proof: String = row.get("pubkey_proof");
             let pubkey_proof = PubkeyProof::try_from_base64(pubkey_proof.as_str())
@@ -615,7 +681,7 @@ impl DbClient {
         Ok(result)
     }
 
-    pub async fn get_decrypt(&self, session: &Uuid) -> Result<Vec<Vec<(Uuid, Vec<u8>, Vec<DecryptShare>)>>, DbError> {
+    pub async fn get_decrypt(&self, session: &Uuid) -> Result<Vec<Vec<SignedDecryptShareSet>>, DbError> {
         let rows = self.client.query("
             SELECT trustee, signature, share, index
             FROM wbb_votes_decrypt
@@ -626,19 +692,19 @@ impl DbClient {
         let mut share_map = HashMap::new();
 
         for row in rows {
-            let trustee = row.get("trustee");
+            let trustee_id = row.get("trustee");
 
             let signature: String = row.get("signature");
-            let signature = base64::decode(signature)
+            let signature = Signature::try_from_base64(&signature)
                 .map_err(|_| DbError::SchemaFailure("signature"))?;
 
             let share: String = row.get("share");
-            let share: Vec<DecryptShare> = serde_json::from_str(share.as_str())
+            let shares: Vec<DecryptShare> = serde_json::from_str(share.as_str())
                 .map_err(|_| DbError::SchemaFailure("share"))?;
 
             let index: i32 = row.get("index");
             share_map.entry(index).or_insert(Vec::new())
-                .push((trustee, signature, share));
+                .push(SignedDecryptShareSet { trustee_id, signature, shares });
         }
 
         let mut indices = share_map.keys().collect::<Vec<_>>();
@@ -652,7 +718,7 @@ impl DbClient {
         Ok(result)
     }
 
-    pub async fn get_all_idents(&self, session: &Uuid) -> Result<Vec<(VoterId, Commitment, Commitment)>, DbError> {
+    pub async fn get_all_idents(&self, session: &Uuid) -> Result<Vec<VoterIdent>, DbError> {
         // Below only errors if not found
         let rows = self.client.query("
             SELECT voter_id, c_a, c_b FROM wbb_idents WHERE session=$1;
@@ -671,7 +737,7 @@ impl DbClient {
             let c_b = Commitment::try_from(c_b)
                 .map_err(|_| DbError::SchemaFailure("c_b"))?;
 
-            result.push((voter_id, c_a, c_b));
+            result.push(VoterIdent { id: voter_id, c_a, c_b });
         }
 
         Ok(result)
@@ -698,10 +764,10 @@ impl DbClient {
             let sender_id = row.get("signed_by");
 
             let signature: String = row.get("signature");
-            let signature = base64::decode(signature)
+            let signature = Signature::try_from_base64(&signature)
                 .map_err(|_| DbError::SchemaFailure("signature"))?;
 
-            let inner = TrusteeMessage::EcCommit { voter_id, enc_mac, enc_vote };
+            let inner = TrusteeMessage::EcCommit(EcCommit { voter_id, enc_mac, enc_vote });
 
             result.push(SignedMessage {
                 inner,
@@ -713,16 +779,14 @@ impl DbClient {
         Ok(result)
     }
 
-    pub async fn get_all_ec_pet_commits(&self, session: &Uuid) -> Result<HashMap<Uuid, TrusteeMessage>, DbError> {
+    pub async fn get_all_pet_commits(&self, session: &Uuid) -> Result<HashMap<Uuid, HashMap<VoterId, (Signature, CtCommitment, CtCommitment)>>, DbError> {
         let rows = self.client.query("
-        SELECT trustee, voter_id, vote_commit_1, vote_commit_2, mac_commit_1, mac_commit_2, signature
-        FROM wbb_pet_commits
-        WHERE session=$1;", &[session]).await?;
+            SELECT trustee, voter_id, vote_commit, mac_commit, signature
+            FROM wbb_pet_commits
+            WHERE session=$1;
+        ", &[session]).await?;
 
-        let mut voter_ids = HashMap::new();
-        let mut vote_commits = HashMap::new();
-        let mut mac_commits = HashMap::new();
-        let mut signatures = HashMap::new();
+        let mut result = HashMap::new();
 
         for row in rows {
             let trustee: Uuid = row.get("trustee");
@@ -730,64 +794,151 @@ impl DbClient {
             let voter_id: String = row.get("voter_id");
             let voter_id = VoterId::from(voter_id);
 
-            let mac_commit_1: String = row.get("mac_commit_1");
-            let mac_commit_1 = Commitment::try_from(mac_commit_1)
-                .map_err(|_| DbError::SchemaFailure("mac_commit_1"))?;
+            let vote_commit: String = row.get("vote_commit");
+            let vote_commit = CtCommitment::try_from(vote_commit)
+                .map_err(|_| DbError::SchemaFailure("vote_commit"))?;
 
-            let mac_commit_2: String = row.get("mac_commit_2");
-            let mac_commit_2 = Commitment::try_from(mac_commit_2)
-                .map_err(|_| DbError::SchemaFailure("mac_commit_2"))?;
-
-            let vote_commit_1: String = row.get("vote_commit_1");
-            let vote_commit_1 = Commitment::try_from(vote_commit_1)
-                .map_err(|_| DbError::SchemaFailure("vote_commit_1"))?;
-
-            let vote_commit_2: String = row.get("vote_commit_2");
-            let vote_commit_2 = Commitment::try_from(vote_commit_2)
-                .map_err(|_| DbError::SchemaFailure("vote_commit_2"))?;
+            let mac_commit: String = row.get("mac_commit");
+            let mac_commit = CtCommitment::try_from(mac_commit)
+                .map_err(|_| DbError::SchemaFailure("mac_commit"))?;
 
             let signature: String = row.get("signature");
-            let signature = base64::decode(signature)
+            let signature = Signature::try_from_base64(&signature)
                 .map_err(|_| DbError::SchemaFailure("signature"))?;
 
-            voter_ids.entry(trustee)
-                .or_insert(Vec::new())
-                .push(voter_id);
-
-            vote_commits.entry(trustee)
-                .or_insert(Vec::new())
-                .push((vote_commit_1, vote_commit_2));
-
-            mac_commits.entry(trustee)
-                .or_insert(Vec::new())
-                .push((mac_commit_1, mac_commit_2));
-
-            signatures.entry(trustee)
-                .or_insert(Vec::new())
-                .push(signature);
+            result.entry(trustee)
+                .or_insert(HashMap::new())
+                .entry(voter_id)
+                .or_insert((signature, vote_commit, mac_commit));
         }
 
-        let mut messages = HashMap::new();
+        Ok(result)
+    }
 
-        // Collect trustees from hashmap
-        let mut trustees = Vec::new();
-        for trustee in voter_ids.keys() {
-            trustees.push(trustee.clone());
-        }
+    pub async fn get_all_pet_openings(&self, session: &Uuid) -> Result<HashMap<Uuid, HashMap<VoterId, SignedPetOpening>>, DbError> {
+        let rows = self.client.query("
+            SELECT trustee, voter_id, vote_ct, vote_r1, vote_r2, mac_ct, mac_r1, mac_r2, vote_proof, mac_proof, signature
+            FROM wbb_pet_openings
+            WHERE session=$1;
+        ", &[session]).await?;
 
-        for trustee in trustees {
-            let msg = TrusteeMessage::EcPetCommit {
-                voter_ids: voter_ids.remove(&trustee).unwrap(),
-                vote_commits: vote_commits.remove(&trustee).unwrap(),
-                mac_commits: mac_commits.remove(&trustee).unwrap(),
-                signatures: signatures.remove(&trustee).unwrap(),
+        let mut result = HashMap::new();
+
+        for row in rows {
+            let trustee: Uuid = row.get("trustee");
+
+            let voter_id: String = row.get("voter_id");
+            let voter_id = VoterId::from(voter_id);
+
+            let vote_ct: String = row.get("vote_ct");
+            let vote_ct = Ciphertext::try_from(vote_ct)
+                .map_err(|_| DbError::SchemaFailure("vote_ct"))?;
+
+            let vote_r1: String = row.get("vote_r1");
+            let vote_r1 = Scalar::try_from_base64(&vote_r1)
+                .map_err(|_| DbError::SchemaFailure("vote_r1"))?;
+
+            let vote_r2: String = row.get("vote_r2");
+            let vote_r2 = Scalar::try_from_base64(&vote_r2)
+                .map_err(|_| DbError::SchemaFailure("vote_r2"))?;
+
+            let mac_ct: String = row.get("mac_ct");
+            let mac_ct = Ciphertext::try_from(mac_ct)
+                .map_err(|_| DbError::SchemaFailure("mac_ct"))?;
+
+            let mac_r1: String = row.get("mac_r1");
+            let mac_r1 = Scalar::try_from_base64(&mac_r1)
+                .map_err(|_| DbError::SchemaFailure("mac_r1"))?;
+
+            let mac_r2: String = row.get("mac_r2");
+            let mac_r2 = Scalar::try_from_base64(&mac_r2)
+                .map_err(|_| DbError::SchemaFailure("mac_r2"))?;
+
+            let vote_proof: String = row.get("vote_proof");
+            let vote_proof: PrfEqDlogs = serde_json::from_str(&vote_proof)
+                .map_err(|_| DbError::SchemaFailure("vote_proof"))?;
+
+            let mac_proof: String = row.get("mac_proof");
+            let mac_proof: PrfEqDlogs = serde_json::from_str(&mac_proof)
+                .map_err(|_| DbError::SchemaFailure("mac_proof"))?;
+
+            let signature: String = row.get("signature");
+            let signature = Signature::try_from_base64(&signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
+
+            let vote_opening = CtOpening {
+                ct: vote_ct,
+                r1: vote_r1,
+                r2: vote_r2,
             };
 
-            messages.insert(trustee, msg);
+            let mac_opening = CtOpening {
+                ct: mac_ct,
+                r1: mac_r1,
+                r2: mac_r2,
+            };
+
+
+            result.entry(trustee)
+                .or_insert(HashMap::new())
+                .entry(voter_id)
+                .or_insert(SignedPetOpening {
+                    signature,
+                    vote_opening,
+                    mac_opening,
+                    vote_proof,
+                    mac_proof
+                });
         }
 
-        Ok(messages)
+        Ok(result)
+    }
 
+    pub async fn get_all_pet_decryptions(&self, session: &Uuid) -> Result<HashMap<Uuid, HashMap<VoterId, SignedPetDecryptShare>>, DbError> {
+        let rows = self.client.query("
+            SELECT trustee, voter_id, vote_share, mac_share, signature
+            FROM wbb_pet_decryptions
+            WHERE session=$1;
+        ", &[session]).await?;
+
+        let mut share_map = HashMap::new();
+
+        for row in rows {
+            let trustee_id: Uuid = row.get("trustee");
+            let voter_id: String = row.get("voter_id");
+            let voter_id = VoterId::from(voter_id);
+
+            let signature: String = row.get("signature");
+            let signature = Signature::try_from_base64(&signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
+
+            let vote_share: String = row.get("vote_share");
+            let vote_share: DecryptShare = serde_json::from_str(vote_share.as_str())
+                .map_err(|_| DbError::SchemaFailure("vote_share"))?;
+
+            let mac_share: String = row.get("mac_share");
+            let mac_share: DecryptShare = serde_json::from_str(mac_share.as_str())
+                .map_err(|_| DbError::SchemaFailure("mac_share"))?;
+
+            share_map.entry(trustee_id)
+                .or_insert(HashMap::new())
+                .entry(voter_id)
+                .or_insert(SignedPetDecryptShare {
+                    vote_share,
+                    mac_share,
+                    signature
+                });
+        }
+
+        Ok(share_map)
+    }
+
+    pub async fn count_pet_commits(&self, session: &Uuid) -> Result<i64, DbError> {
+        let result = self.client.query_one("
+            SELECT COUNT(*) FROM wbb_pet_commits WHERE session=$1;
+        ", &[session]).await?;
+
+        Ok(result.get(0))
     }
 
     pub async fn find_ec_commit(&self, session: &Uuid, voter: String) -> Result<bool, DbError> {
@@ -803,7 +954,8 @@ impl DbClient {
             DROP TABLE IF EXISTS
                 trustees, sessions, parameters, parameter_signatures, keygen_commitments,
                 wbb_idents, wbb_commits, wbb_votes, wbb_votes_mix, wbb_votes_mix_proofs,
-                wbb_votes_decrypt, wbb_failed_votes
+                wbb_votes_decrypt, wbb_failed_votes, wbb_pet_commits, wbb_pet_openings,
+                wbb_pet_decryptions,
             CASCADE;
         ", &[]).await?;
 

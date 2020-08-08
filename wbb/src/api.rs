@@ -11,7 +11,7 @@ use uuid::Uuid;
 use common::sign::SignedMessage;
 use crate::db::{DbClient, DbError};
 use common::net::{Response, WrappedResponse, TrusteeMessage, NewSessionRequest};
-use common::vote::VoterMessage;
+use common::voter::VoterMessage;
 
 pub struct Api {
     db: Arc<DbClient>,
@@ -19,7 +19,6 @@ pub struct Api {
 
 impl Api {
     pub async fn new() -> Result<Self, DbError> {
-        // locking doesn't seem to be necessary here...
         let db = Arc::new(DbClient::new().await?);
 
         Ok(Self {
@@ -42,12 +41,18 @@ impl Api {
                 post_ec_vote,
                 post_ec_vote_mix,
                 post_ec_vote_decrypt,
-                post_ec_pet_commits,
+                post_pet_commits,
+                post_pet_openings,
+                post_pet_decryptions,
                 get_ec_votes,
                 get_ec_mix_votes,
                 get_ec_vote_decrypt,
                 get_idents,
                 get_ec_commits,
+                get_pet_commit_count,
+                get_pet_commits,
+                get_pet_openings,
+                get_pet_decryptions,
             ])
             .manage(self)
             .launch();
@@ -92,8 +97,13 @@ fn register_trustee_inner(state: State<'_, Api>, session: String, msg: Json<Sign
     }?;
 
     let db = state.db.clone();
+
+    // Find the number of trustees we're supposed to have
     let trustee_count = executor::block_on(db.get_trustee_count(&session).map_err(|_| failure(Response::InvalidSession)))?;
+    // Find the number of trustees we do have
     let trustees = executor::block_on(db.count_trustees(&session).map_err(|_| failure(Response::InvalidSession)))?;
+
+    // Only insert this trustee if we need more
     if trustees < trustee_count {
         executor::block_on(db.insert_trustee(&session, &info.id, &info.pubkey, info.index, &info.address, &msg.signature))
             .map_err(|e| {
@@ -246,12 +256,12 @@ fn post_ident_inner(state: State<'_, Api>, session: String, msg: Json<VoterMessa
     let session = Uuid::from_str(&session)
         .map_err(|_| failure(Response::InvalidSession))?;
 
-    let (voter_id, c_a, c_b) = match msg.into_inner() {
-        VoterMessage::InitialCommit { voter_id, c_a, c_b } => Ok((voter_id, c_a, c_b)),
+    let ident = match msg.into_inner() {
+        VoterMessage::InitialCommit(ident) => Ok(ident),
         _ => Err(failure(Response::InvalidRequest))
     }?;
 
-    Ok(executor::block_on(state.db.clone().insert_ident(&session, voter_id, &c_a, &c_b))
+    Ok(executor::block_on(state.db.clone().insert_ident(&session, ident))
         .map(|_| success(Response::Ok))
         .map_err(|_| failure(Response::TrusteeMissing))?)
 }
@@ -264,8 +274,8 @@ fn post_ec_commit_inner(state: State<'_, Api>, session: String, msg: Json<Signed
     let session = Uuid::from_str(&session)
         .map_err(|_| failure(Response::InvalidSession))?;
 
-    let (voter_id, enc_mac, enc_vote) = match &msg.inner {
-        TrusteeMessage::EcCommit { voter_id, enc_mac, enc_vote } => Ok((voter_id, enc_mac, enc_vote)),
+    let commit = match &msg.inner {
+        TrusteeMessage::EcCommit(commit) => Ok(commit),
         _ => Err(failure(Response::InvalidRequest))
     }?;
 
@@ -278,7 +288,7 @@ fn post_ec_commit_inner(state: State<'_, Api>, session: String, msg: Json<Signed
         return Err(failure(Response::InvalidSignature));
     }
 
-    executor::block_on(db.insert_ec_commit(&session, voter_id.clone(), enc_mac, enc_vote, &msg.sender_id, &msg.signature))
+    executor::block_on(db.insert_ec_commit(&session, &msg.sender_id, commit, &msg.signature))
         .map_err(|_| failure(Response::FailedInsertion))?;
 
     Ok(success(Response::Ok))
@@ -455,7 +465,7 @@ fn post_ec_vote_decrypt_inner(state: State<'_, Api>, content_type: &ContentType,
 
     let db = state.db.clone();
 
-    // Verify the signature to ensure this was sent by an EC rep
+    // Verify the signature to ensure this was sent by an EC trustee
     let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
         .map_err(|_| failure(Response::InvalidSignature))?;
     if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
@@ -522,7 +532,7 @@ fn get_ec_commits_inner(state: State<'_, Api>, session: String) -> EitherRespons
 }
 
 #[rocket::post("/api/<session>/tally/pet/commit", data = "<data>")]
-fn post_ec_pet_commits(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
+fn post_pet_commits(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
     respond(post_ec_pet_commits_inner(state, content_type, session, data))
 }
 
@@ -560,7 +570,7 @@ fn post_ec_pet_commits_inner(state: State<'_, Api>, content_type: &ContentType, 
         return Err(failure(Response::InvalidSignature));
     }
 
-    executor::block_on(db.insert_ec_pet_commits(&session, &msg.sender_id, voter_ids, vote_commits, mac_commits, signatures))
+    executor::block_on(db.insert_pet_commits(&session, &msg.sender_id, voter_ids, vote_commits, mac_commits, signatures))
         .map_err(|e| {
             match e {
                 DbError::InsertAlreadyExists => failure(Response::FailedInsertion),
@@ -574,17 +584,168 @@ fn post_ec_pet_commits_inner(state: State<'_, Api>, content_type: &ContentType, 
     Ok(success(Response::Ok))
 }
 
-#[rocket::get("/api/<session>/tally/pet/commit")]
-fn get_ec_pet_commits(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
-    respond(get_ec_pet_commits_inner(state, session))
+#[rocket::get("/api/<session>/tally/pet/commit/count")]
+fn get_pet_commit_count(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_pet_commit_count_inner(state, session))
 }
-fn get_ec_pet_commits_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+fn get_pet_commit_count_inner(state: State<'_, Api>, session: String) -> EitherResponse {
     let session = Uuid::from_str(&session)
         .map_err(|_| failure(Response::InvalidSession))?;
-    let results = executor::block_on(state.db.clone().get_all_ec_pet_commits(&session))
+    let results = executor::block_on(state.db.clone().count_pet_commits(&session))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::Count(results)))
+}
+
+#[rocket::get("/api/<session>/tally/pet/commit")]
+fn get_pet_commits(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_pet_commits_inner(state, session))
+}
+fn get_pet_commits_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.clone().get_all_pet_commits(&session))
         .map_err(|e| {
             eprintln!("Error: {}", e);
             failure(Response::MiscError)
         })?;
     Ok(success(Response::PetCommits(results)))
+}
+
+#[rocket::post("/api/<session>/tally/pet/opening", data = "<data>")]
+fn post_pet_openings(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
+    respond(post_pet_openings_inner(state, content_type, session, data))
+}
+
+fn post_pet_openings_inner(state: State<'_, Api>, content_type: &ContentType,  session: String, data: Data) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    // parse multipart form
+    let options = MultipartFormDataOptions::with_multipart_form_data_fields(
+        vec! [
+            MultipartFormDataField::raw("msg").size_limit(1024 * 1024 * 40)
+        ]
+    );
+    let mut data = MultipartFormData::parse(content_type, data, options)
+        .map_err(|_| failure(Response::ParseError))?;
+    let msg = data.raw.remove("msg")
+        .ok_or(failure(Response::ParseError))?
+        .remove(0);
+    let msg: SignedMessage = serde_json::from_str(String::from_utf8(msg.raw)
+        .map_err(|_| failure(Response::ParseError))?
+        .as_str())
+        .map_err(|_| failure(Response::ParseError))?;
+
+    let (voter_ids, openings) = match &msg.inner {
+        TrusteeMessage::EcPetOpening { voter_ids, openings } => Ok((voter_ids, openings)),
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    let db = state.db.clone();
+
+    // Verify the signature to ensure this was sent by an EC rep
+    let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
+        .map_err(|_| failure(Response::InvalidSignature))?;
+    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+        return Err(failure(Response::InvalidSignature));
+    }
+
+    executor::block_on(db.insert_pet_openings(&session, &msg.sender_id, voter_ids, openings))
+        .map_err(|e| {
+            match e {
+                DbError::InsertAlreadyExists => failure(Response::FailedInsertion),
+                _ => {
+                    eprintln!("unexpected error: {}", e);
+                    failure(Response::MiscError)
+                }
+            }
+        })?;
+
+    Ok(success(Response::Ok))
+}
+
+#[rocket::get("/api/<session>/tally/pet/opening")]
+fn get_pet_openings(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_pet_openings_inner(state, session))
+}
+fn get_pet_openings_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.clone().get_all_pet_openings(&session))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::PetOpenings(results)))
+}
+
+#[rocket::post("/api/<session>/tally/pet/decrypt", data = "<data>")]
+fn post_pet_decryptions(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
+    respond(post_pet_decryptions_inner(state, content_type, session, data))
+}
+
+fn post_pet_decryptions_inner(state: State<'_, Api>, content_type: &ContentType,  session: String, data: Data) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    // parse multipart form
+    let options = MultipartFormDataOptions::with_multipart_form_data_fields(
+        vec! [
+            MultipartFormDataField::raw("msg").size_limit(1024 * 1024 * 40)
+        ]
+    );
+    let mut data = MultipartFormData::parse(content_type, data, options)
+        .map_err(|_| failure(Response::ParseError))?;
+    let msg = data.raw.remove("msg")
+        .ok_or(failure(Response::ParseError))?
+        .remove(0);
+    let msg: SignedMessage = serde_json::from_str(String::from_utf8(msg.raw)
+        .map_err(|_| failure(Response::ParseError))?
+        .as_str())
+        .map_err(|_| failure(Response::ParseError))?;
+
+    let (voter_ids, shares) = match &msg.inner {
+        TrusteeMessage::EcPetDecrypt { voter_ids, shares } => Ok((voter_ids, shares)),
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    let db = state.db.clone();
+
+    // Verify the signature to ensure this was sent by an EC rep
+    let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
+        .map_err(|_| failure(Response::InvalidSignature))?;
+    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+        return Err(failure(Response::InvalidSignature));
+    }
+
+    executor::block_on(db.insert_pet_decrypt(&session, &msg.sender_id, voter_ids, shares))
+        .map_err(|e| {
+            match e {
+                DbError::InsertAlreadyExists => failure(Response::FailedInsertion),
+                _ => {
+                    eprintln!("unexpected error: {}", e);
+                    failure(Response::MiscError)
+                }
+            }
+        })?;
+
+    Ok(success(Response::Ok))
+}
+
+#[rocket::get("/api/<session>/tally/pet/decrypt")]
+fn get_pet_decryptions(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_pet_decryptions_inner(state, session))
+}
+fn get_pet_decryptions_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.clone().get_all_pet_decryptions(&session))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::PetDecryptions(results)))
 }

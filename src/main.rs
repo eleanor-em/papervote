@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use common::APP_NAME;
 use common::config::PapervoteConfig;
-use common::vote::{Candidate, Vote};
+use common::voter::{Candidate, Vote};
 use common::net::{WrappedResponse, NewSessionRequest};
 use trustee::Trustee;
 use voter::Voter;
@@ -81,13 +81,31 @@ async fn main() -> Result<()> {
         println!("decrypt #{} done", trustee.index());
     }
 
-    // Run data matching + PET commits
+    // Run data matching
+    let pet_instances = trustees[0].validate_votes().await?;
+
+    // Run PET commitments
     let mut pet_data = Vec::new();
     for trustee in trustees.iter_mut() {
-        pet_data.push(trustee.validate_votes().await?);
+        pet_data.push(trustee.do_pet_commits(pet_instances.clone()).await?);
+        println!("PET commit #{} done", trustee.index());
     }
 
-    // Run PET finalisation
+    // Run PET openings
+    let mut pet_records = Vec::new();
+    for (trustee, data) in trustees.iter_mut().zip(pet_data.into_iter()) {
+        pet_records.push(trustee.do_pet_openings(data).await?);
+        println!("PET opening #{} done", trustee.index());
+    }
+
+    // Run PET decryptions
+    let mut ciphertexts = HashMap::new();
+    for (trustee, data) in trustees.iter_mut().zip(pet_records.into_iter()) {
+        ciphertexts = trustee.do_pet_decryptions(data).await?;
+        println!("PET decryption #{} done", trustee.index());
+    }
+
+    trustees[0].finish_pets(ciphertexts).await?;
 
     time::delay_for(Duration::from_millis(1000)).await;
     Ok(())
@@ -179,7 +197,7 @@ fn random_voter(session_id: Uuid, pubkey: PublicKey, ctx: CryptoContext, commit_
     let mut prefs: Vec<_> = candidates.iter().enumerate().map(|(_, candidate)| candidate.clone()).collect();
     prefs.shuffle(&mut rand::thread_rng());
 
-    let id = base64::encode(Uuid::new_v4().as_bytes()).replace("/", "");
+    let id = base64::encode(Uuid::new_v4().as_bytes()).replace("/", "-");
     let mut voter = Voter::new(session_id.clone(), pubkey, ctx.clone(), commit_ctx, id)?;
     let mut vote = Vote::new();
     for (i, candidate) in prefs.iter().enumerate() {

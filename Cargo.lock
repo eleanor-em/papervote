@@ -395,8 +395,8 @@ dependencies = [
 
 [[package]]
 name = "cryptid"
-version = "0.6.0"
-source = "git+https://github.com/eleanor-em/cryptid#783384b07ece057052e239e32d44a6113afd4c73"
+version = "0.7.0"
+source = "git+https://github.com/eleanor-em/cryptid#98ebfc313cd4f96cb93dfc8e067f2a854d617569"
 dependencies = [
  "base64 0.12.3",
  "curve25519-dalek",
@@ -965,9 +965,9 @@ checksum = "e0bd112d44d9d870a6819eb505d04dd92b5e4d94bb8c304924a0872ae7016fb5"
 
 [[package]]
 name = "indexmap"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b88cd59ee5f71fea89a62248fc8f387d44400cefe05ef548466d61ced9029a7"
+checksum = "86b45e59b16c76b11bf9738fd5d38879d3bd28ad292d7b313608becb17ae2df9"
 dependencies = [
  "autocfg 1.0.0",
  "hashbrown",
