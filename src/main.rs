@@ -68,20 +68,28 @@ async fn main() -> Result<()> {
     // Close vote listener
     println!("Votes closing soon...");
     ec.close_votes(N).await?;
-    time::delay_for(Duration::from_millis(1000)).await;
 
     // Run first shuffle
-    for trustee in trustees.iter() {
+    for trustee in trustees.iter_mut() {
         trustee.mix_votes().await?;
         println!("shuffle #{} done", trustee.index());
     }
 
     // Run first decryption
-    for trustee in trustees.iter() {
+    for trustee in trustees.iter_mut() {
         trustee.decrypt_first_mix().await?;
         println!("decrypt #{} done", trustee.index());
     }
 
+    // Run data matching + PET commits
+    let mut pet_data = Vec::new();
+    for trustee in trustees.iter_mut() {
+        pet_data.push(trustee.validate_votes().await?);
+    }
+
+    // Run PET finalisation
+
+    time::delay_for(Duration::from_millis(1000)).await;
     Ok(())
 }
 

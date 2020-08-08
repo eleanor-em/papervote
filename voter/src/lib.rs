@@ -90,11 +90,14 @@ impl Voter {
     }
 
     pub async fn post_init_commit(&self, api_base_addr: &str) -> Result<(), VoterError> {
+        let c_a = self.commit_ctx.commit(&self.a.into(), &self.r_a.into());
+        let c_b = self.commit_ctx.commit(&self.b.into(), &self.r_b.into());
+
         let msg = VoterMessage::InitialCommit {
             voter_id: self.voter_id.clone(),
-            c_a: self.commit_ctx.commit(&self.a.into(), &self.r_a.into()),
-            c_b: self.commit_ctx.commit(&self.b.into(), &self.r_b.into()),
+            c_a, c_b,
         };
+
 
         let client = reqwest::Client::new();
         let response: WrappedResponse = client.post(&format!("{}/{}/cast/ident", api_base_addr, self.session_id))
@@ -196,6 +199,7 @@ impl Voter {
         let r1 = self.ctx.random_scalar();
         let r2 = self.ctx.random_scalar();
 
+        // Exponential encryption
         let mac = &self.ctx.g_to(&self.get_mac().ok_or(VoterError::VoteMissing)?);
         let vote = &self.ctx.g_to(&self.get_encoded_vote().ok_or(VoterError::VoteMissing)?);
 

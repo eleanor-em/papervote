@@ -5,7 +5,7 @@ use std::fmt::{Formatter, Display};
 
 use cryptid::{CryptoError, Scalar, Hasher};
 use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext, CurveElem};
-use cryptid::threshold::{ThresholdGenerator, Threshold, ThresholdParty, KeygenCommitment};
+use cryptid::threshold::{Threshold, ThresholdParty, Decryption, PubkeyProof};
 use cryptid::AsBase64;
 use reqwest::Client;
 use reqwest::multipart::{Form, Part};
@@ -13,20 +13,23 @@ use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
-use common::sign;
 use common::sign::{SignedMessage, SigningKeypair};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use cryptid::zkp::PrfKnowDlog;
+use tokio::io::AsyncReadExt;
+use cryptid::zkp::{PrfKnowDlog, PrfEqDlogs};
 use std::sync::{Arc, Mutex};
-use ring::signature::KeyPair;
 use futures::future::AbortHandle;
 use common::net::{TrusteeMessage, TrusteeInfo, Response, WrappedResponse};
 use common::vote::{VoterMessage, Candidate, VoterId, Ballot, Vote};
-use cryptid::commit::PedersenCtx;
+use cryptid::commit::{PedersenCtx, Commitment};
 use cryptid::shuffle::Shuffle;
 use rayon::prelude::*;
+use std::convert::TryFrom;
+use crate::gen::GeneratingTrustee;
+
+mod api;
+mod gen;
 
 #[derive(Debug)]
 pub enum TrusteeError {
@@ -36,7 +39,7 @@ pub enum TrusteeError {
     Serde(serde_json::Error),
     Net(reqwest::Error),
     Decode,
-    Api,
+    FailedResponse(Response),
     InvalidSignature,
     InvalidResponse,
     MissingRegistration,
@@ -77,287 +80,40 @@ impl From<reqwest::Error> for TrusteeError {
 
 impl Error for TrusteeError {}
 
-pub struct GeneratingTrustee {
-    api_base_addr: String,
-    session_id: Uuid,
-    id: Uuid,
-    signing_keypair: SigningKeypair,
-    trustee_info: HashMap<Uuid, TrusteeInfo>,
-    generator: ThresholdGenerator,
-    log: Hasher,
+struct PetInstance {
+    voter_id: VoterId,
+    enc_mac: Ciphertext,
+    enc_vote: Ciphertext,
+    enc_received_vote: Ciphertext,
+    a: CurveElem,
+    b: CurveElem,
 }
 
-impl GeneratingTrustee {
-    pub fn new(api_base_addr: String, session_id: Uuid, ctx: &CryptoContext, index: usize, k: usize, n: usize) -> Result<GeneratingTrustee, CryptoError> {
-        let mut ctx = ctx.clone();
-        let id = Uuid::new_v4();
-
-        // Generate a signature keypair
-        let signing_keypair = sign::new_keypair(&ctx);
-
-        // Create identification for this trustee
-        let port = 14000 + index;
-        let mut trustee_info = HashMap::new();
-        let my_info = TrusteeInfo {
-            id,
-            pubkey: signing_keypair.public_key().into(),
-            pubkey_share: None,
-            index,
-            address: format!("localhost:{}", port),
-        };
-        trustee_info.insert(id, my_info);
-
-        let generator = ThresholdGenerator::new(&mut ctx, index, k, n);
-
-        Ok(Self {
-            api_base_addr,
-            session_id,
-            id,
-            signing_keypair,
-            trustee_info,
-            generator,
-            log: Hasher::sha_256(),
-        })
-    }
-
-    pub fn session_id(&self) -> &Uuid {
-        &self.session_id
-    }
-
-    pub fn verify_all(&self, messages: &[SignedMessage]) -> Result<bool, TrusteeError> {
-        for message in messages {
-            if let Some(info) = self.trustee_info.get(&message.sender_id) {
-                if !message.verify(&info.pubkey)? {
-                    return Ok(false);
-                }
-            } else {
-                return Err(TrusteeError::NoSuchTrustee(message.sender_id));
-            }
-        }
-
-        Ok(true)
-    }
-
-    pub fn gen_registration(&self) -> SignedMessage {
-        let msg = TrusteeMessage::Info { info: self.trustee_info[&self.id].clone() };
-        self.sign(msg)
-    }
-
-    pub fn add_info(&mut self, info: TrusteeInfo) {
-        self.trustee_info.insert(info.id, info);
-    }
-
-    pub fn received_info(&self) -> bool {
-        self.trustee_info.len() == self.generator.trustee_count()
-    }
-
-    pub fn gen_commitment(&self) -> SignedMessage {
-        let commitment = self.generator.get_commitment();
-        let msg = TrusteeMessage::KeygenCommit { commitment };
-        self.sign(msg)
-    }
-
-    pub fn add_commitment(&mut self, id: &Uuid, commitment: &KeygenCommitment) -> Result<(), TrusteeError> {
-        Ok(self.generator.receive_commitment(self.trustee_info[id].index, commitment)?)
-    }
-
-    pub fn received_commitments(&self) -> bool {
-        self.generator.received_commitments()
-    }
-
-    pub fn gen_shares(&mut self) -> Result<HashMap<Uuid, Scalar>, TrusteeError> {
-        let mut result = HashMap::new();
-        for (id, info) in self.trustee_info.iter() {
-            let share = self.generator.get_polynomial_share(info.index)?;
-            if self.id == *id {
-                self.generator.receive_share(info.index, &share)?;
-            } else {
-                result.insert(id.clone(), share);
-            }
-        }
-
-        Ok(result)
-    }
-
-    pub async fn receive_shares(&mut self) -> Result<(), TrusteeError> {
-        let index = self.trustee_info[&self.id].index;
-        let addr = &self.trustee_info[&self.id].address;
-
-        // Accept connections
-        let mut listener = TcpListener::bind(addr).await?;
-
-        while let Some(stream) = listener.next().await {
-            if let Ok(mut stream) = stream {
-                // Read entire stream
-                let mut buffer = String::new();
-                stream.read_to_string(&mut buffer).await?;
-
-                // Decode message
-                if let Ok(msg) = serde_json::from_str::<SignedMessage>(&buffer) {
-                    // Check signature
-                    if let Some(info) = self.trustee_info.get(&msg.sender_id) {
-                        if msg.verify(&info.pubkey)? {
-                            if let TrusteeMessage::KeygenShare { share } = msg.inner {
-                                self.generator.receive_share(info.index, &share)?;
-                            } else {
-                                eprintln!("#{}: unexpected message type", index);
-                            }
-                        } else {
-                            eprintln!("#{}: failed verifying signature from #{}", index, info.index);
-                        }
-                    } else {
-                        eprintln!("#{}: unknown sender id: {}", index, msg.sender_id);
-                    }
-                } else {
-                    eprintln!("#{}: received malformed message", index);
-                }
-            }
-
-            // Check if we received all shares
-            if self.generator.is_complete() {
-                break;
-            }
-        }
-
-        Ok(())
-    }
-
-    // Sign the given message
-    fn sign(&self, message: TrusteeMessage) -> SignedMessage {
-        let data = serde_json::to_string(&message).unwrap().as_bytes().to_vec();
-        let signature = self.signing_keypair.sign(&data).as_ref().to_vec();
-
-        SignedMessage {
-            inner: message,
-            signature,
-            sender_id: self.id,
-        }
-    }
-
-    async fn send_share(address: String, msg: SignedMessage) -> Result<(), TrusteeError> {
-        loop {
-            // Wait a moment for the socket to open
-            time::delay_for(Duration::from_millis(200)).await;
-            if let Ok(mut stream) = TcpStream::connect(&address).await {
-                stream.write_all(serde_json::to_string(&msg)?.as_ref()).await?;
-                return Ok(());
-            }
-        }
-    }
-
-    async fn get_registrations(&mut self, my_registration: &SignedMessage, client: &Client) -> Result<(), TrusteeError> {
-        loop {
-            // Wait a moment for other registrations
-            time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&format!("{}/{}/trustee/all", &self.api_base_addr, &self.session_id))
-                .send().await?
-                .json().await?;
-
-            // Check signatures
-            if let Response::ResultSet(results) = res.msg {
-                // Make sure our message is in there
-                if !results.contains(my_registration) {
-                    return Err(TrusteeError::MissingCommitment)?;
-                }
-
-                for result in results {
-                    if let TrusteeMessage::Info { info } = &result.inner {
-                        self.log.update(serde_json::to_string(&result.clone()).unwrap().as_bytes());
-                        if result.verify(&info.pubkey)? {
-                            self.add_info(info.clone());
-                        }
-                    }
-                }
-                break;
-            } else {
-                eprintln!("unexpected response: {:?}", res.msg);
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn get_commitments(&mut self, my_commit: &SignedMessage, client: &Client) -> Result<(), TrusteeError> {
-        loop {
-            // Wait a moment for other registrations
-            time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&format!("{}/{}/keygen/commitment/all", self.api_base_addr, self.session_id))
-                .send().await?
-                .json().await?;
-
-            // Check signatures
-            if let Response::ResultSet(results) = res.msg {
-                if self.verify_all(&results)? {
-                    // Make sure our message is in there
-                    if !results.contains(my_commit) {
-                        return Err(TrusteeError::MissingCommitment)?;
-                    }
-
-                    for result in results {
-                        if let TrusteeMessage::KeygenCommit { commitment } = &result.inner {
-                            self.log.update(serde_json::to_string(&result.clone()).unwrap().as_bytes());
-                            self.add_commitment(&result.sender_id, &commitment)?;
-                        } else {
-                            return Err(TrusteeError::InvalidResponse)?;
-                        }
-                    }
-                    return Ok(());
-                } else {
-                    return Err(TrusteeError::InvalidSignature)?;
-                }
-            } else {
-                eprintln!("unexpected response: {:?}", res.msg);
-            }
-        }
-    }
-
-    async fn get_signatures(&mut self, my_sig: &SignedMessage, client: &Client) -> Result<(), TrusteeError> {
-        loop {
-            // Wait a moment for other registrations
-            time::delay_for(Duration::from_millis(200)).await;
-            let res: WrappedResponse = client.get(&format!("{}/{}/keygen/sign/all", &self.api_base_addr, &self.session_id))
-                .send().await?
-                .json().await?;
-
-            // Check signatures
-            if let Response::ResultSet(results) = res.msg {
-                if self.verify_all(&results)? {
-                    // Make sure our message is in there
-                    if !results.contains(my_sig) {
-                        return Err(TrusteeError::MissingSignature)?;
-                    }
-
-                    for result in results {
-                        if let TrusteeMessage::KeygenSign { pubkey: _, pubkey_share } = &result.inner {
-                            self.log.update(serde_json::to_string(&result.clone()).unwrap().as_bytes());
-                            self.trustee_info.get_mut(&result.sender_id).unwrap()
-                                .pubkey_share.replace(pubkey_share.clone());
-                        } else {
-                            return Err(TrusteeError::InvalidResponse)?;
-                        }
-                    }
-                    return Ok(());
-                } else {
-                    return Err(TrusteeError::InvalidSignature)?;
-                }
-            } else {
-                eprintln!("unexpected response: {:?}", res.msg);
-            }
-        }
-    }
+pub struct PetData {
+    voter_id: VoterId,
+    vote_ct: Ciphertext,
+    vote_r: (Scalar, Scalar),
+    mac_ct: Ciphertext,
+    mac_r: (Scalar, Scalar),
+    vote_proof: PrfEqDlogs,
+    mac_proof: PrfEqDlogs,
+    vote_commit: (Commitment, Commitment),
+    mac_commit: (Commitment, Commitment),
 }
 
 pub struct Trustee {
     info: InternalInfo,
-    _trustee_info: HashMap<Uuid, TrusteeInfo>,
+    trustee_info: HashMap<Uuid, TrusteeInfo>,
+    failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
     received_votes: Arc<Mutex<Vec<SignedMessage>>>,
+    downloaded_votes: Option<Vec<Vec<Ciphertext>>>,
     party: ThresholdParty,
     abort_handle: Option<AbortHandle>,
     log: Hasher,
 }
 
 #[derive(Clone)]
-struct InternalInfo {
+pub struct InternalInfo {
     api_base_addr: String,
     address: String,
     index: usize,
@@ -366,8 +122,9 @@ struct InternalInfo {
     client: Client,
     signing_keypair: Arc<SigningKeypair>,
     ctx: CryptoContext,
+    commit_ctx: PedersenCtx,
     pubkey: PublicKey,
-    pubkey_share: CurveElem,
+    pubkey_proof: PubkeyProof,
 }
 
 impl Trustee {
@@ -378,7 +135,11 @@ impl Trustee {
                      min_trustees: usize,
                      trustee_count: usize) -> Result<Trustee, TrusteeError> {
         let mut trustee = GeneratingTrustee::new(api_base_addr.clone(), session_id.clone(), &ctx, index, min_trustees, trustee_count)?;
-        let client = reqwest::Client::new();
+
+        let client = reqwest::Client::builder()
+            .gzip(true)
+            .timeout(Duration::from_secs(60))
+            .build().map_err(|_| TrusteeError::InvalidState)?;
 
         // 1. Registration
         let msg = trustee.gen_registration();
@@ -417,7 +178,7 @@ impl Trustee {
         // 4. Sign public key
         let msg = trustee.sign(TrusteeMessage::KeygenSign {
             pubkey: party.pubkey(),
-            pubkey_share: party.pubkey_share(),
+            pubkey_proof: party.pubkey_proof(),
         });
         let response: WrappedResponse = client.post(&format!("{}/{}/keygen/sign", api_base_addr, session_id))
             .json(&msg).send().await?
@@ -440,15 +201,18 @@ impl Trustee {
             client,
             signing_keypair: Arc::new(trustee.signing_keypair),
             ctx,
+            commit_ctx: PedersenCtx::new(session_id.as_bytes()),
             pubkey: party.pubkey(),
-            pubkey_share: party.pubkey_share(),
+            pubkey_proof: party.pubkey_proof(),
         };
 
         // TODO: Store on disk.
         Ok(Trustee {
             info,
-            _trustee_info: trustee.trustee_info,
+            trustee_info: trustee.trustee_info,
+            failed_voter_ids: Arc::new(Mutex::new(Vec::new())),
             received_votes: Arc::new(Mutex::new(Vec::new())),
+            downloaded_votes: None,
             party,
             abort_handle: None,
             log: trustee.log,
@@ -507,19 +271,25 @@ impl Trustee {
     }
 
     pub fn receive_voter_data(&mut self, candidates: Arc<HashMap<usize, Candidate>>)  {
-        let (future, handle) = futures::future::abortable(Self::receive_voter_data_task(self.info.clone(), self.received_votes.clone(), candidates));
+        let (future, handle) = futures::future::abortable(Self::receive_voter_data_task(
+            self.info.clone(),
+            self.failed_voter_ids.clone(),
+            self.received_votes.clone(),
+            candidates
+        ));
         self.abort_handle = Some(handle);
         tokio::spawn(future);
     }
 
     async fn receive_voter_data_task(info: InternalInfo,
+                                     failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
                                      received_votes: Arc<Mutex<Vec<SignedMessage>>>,
                                      candidates: Arc<HashMap<usize, Candidate>>) -> Result<(), TrusteeError> {
         let mut listener = TcpListener::bind(&info.address).await?;
 
         while let Some(stream) = listener.next().await {
             if let Ok(stream) = stream {
-                tokio::spawn(Self::receive_voter_data_inner(stream, info.clone(), received_votes.clone(), candidates.clone()));
+                tokio::spawn(Self::receive_voter_data_inner(stream, info.clone(), failed_voter_ids.clone(), received_votes.clone(), candidates.clone()));
             }
         }
 
@@ -528,6 +298,7 @@ impl Trustee {
 
     async fn receive_voter_data_inner(mut stream: TcpStream,
                                       info: InternalInfo,
+                                      failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
                                       received_votes: Arc<Mutex<Vec<SignedMessage>>>,
                                       candidates: Arc<HashMap<usize, Candidate>>) -> Result<(), TrusteeError> {
         // Read entire stream
@@ -538,14 +309,27 @@ impl Trustee {
             match msg {
                 VoterMessage::EcCommit { voter_id, enc_mac, enc_vote, prf_know_mac, prf_know_vote } => {
                     tokio::spawn((async move || {
-                        if let Err(e) = Self::handle_ec_commit(info.clone(), voter_id, enc_mac, enc_vote, prf_know_mac, prf_know_vote).await {
+                        if let Err(e) = Self::handle_ec_commit(
+                            info.clone(),
+                            voter_id,
+                            enc_mac,
+                            enc_vote,
+                            prf_know_mac,
+                            prf_know_vote
+                        ).await {
                             eprintln!("#{}: error handling commit: {}", info.index, e);
                         }
                     })());
                 },
                 VoterMessage::Ballot(ballot) => {
                     tokio::spawn((async move || {
-                        if let Err(e) = Self::handle_ballot(info.clone(), received_votes.clone(), candidates.clone(), ballot).await {
+                        if let Err(e) = Self::handle_ballot(
+                            info.clone(),
+                            failed_voter_ids.clone(),
+                            received_votes.clone(),
+                            candidates.clone(),
+                            ballot
+                        ).await {
                             eprintln!("#{}: error handling ballot: {}", info.index, e);
                         }
                     })());
@@ -581,48 +365,38 @@ impl Trustee {
         let r = info.ctx.random_scalar();
         let enc_vote = info.pubkey.rerand(&info.ctx, &enc_vote, &r);
 
-        // Construct message
-        let inner = TrusteeMessage::EcCommit { voter_id, enc_mac, enc_vote };
-        let data = serde_json::to_string(&inner)?.as_bytes().to_vec();
-        let signature = info.signing_keypair.sign(&data).as_ref().to_vec();
-
-        let msg = SignedMessage {
-            inner,
-            signature,
-            sender_id: info.id,
-        };
-
-        // Post to WBB
-        let response: WrappedResponse = info.client.post(&format!("{}/{}/cast/commit", &info.api_base_addr, &info.session_id))
-            .json(&msg).send().await?
-            .json().await?;
-
-        if !response.status {
-            eprintln!("error submitting ident: {:?}", response.msg);
-        }
+        api::post_ec_commit(&info, voter_id, enc_mac, enc_vote).await?;
 
         Ok(())
     }
 
     async fn handle_ballot(info: InternalInfo,
+                           failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
                            received_votes: Arc<Mutex<Vec<SignedMessage>>>,
                            candidates: Arc<HashMap<usize, Candidate>>,
                            ballot: Ballot) -> Result<(), TrusteeError> {
+        let mut failed = false;
+
         // Check the proofs
         if !ballot.p1_prf_a.verify() {
             eprintln!("#{}: failed to verify proof-of-knowledge for a", info.index);
-            return Ok(());
+            failed = true;
         }
         if !ballot.p1_prf_b.verify() {
             eprintln!("#{}: failed to verify proof-of-knowledge for b", info.index);
-            return Ok(());
+            failed = true;
         }
         if !ballot.p1_prf_r_a.verify() {
             eprintln!("#{}: failed to verify proof-of-knowledge for r_a", info.index);
-            return Ok(());
+            failed = true;
         }
         if !ballot.p1_prf_r_b.verify() {
             eprintln!("#{}: failed to verify proof-of-knowledge for r_b", info.index);
+            failed = true;
+        }
+        if failed {
+            let mut vids = failed_voter_ids.lock().unwrap();
+            vids.push(ballot.p2_id);
             return Ok(());
         }
 
@@ -660,7 +434,7 @@ impl Trustee {
             .map_err(|_| TrusteeError::Decode)?;
         let vote_value: Scalar = vote_value.into();
         let prf_enc_vote = info.ctx.random_scalar();
-        let enc_vote = info.pubkey.encrypt(&info.ctx, &ctx.g_to(vote_value), &prf_enc_vote);
+        let enc_vote = info.pubkey.encrypt(&info.ctx, &info.ctx.g_to(&vote_value), &prf_enc_vote);
 
         // Construct message
         let inner = TrusteeMessage::EcVote {
@@ -681,33 +455,26 @@ impl Trustee {
         Ok(())
     }
 
-    pub async fn mix_votes(&self) -> Result<(), TrusteeError> {
-        // download votes
-        let client = reqwest::Client::builder()
-            .gzip(true)
-            .timeout(Duration::from_secs(60))
-            .build().map_err(|_| TrusteeError::InvalidState)?;
-
+    pub async fn mix_votes(&mut self) -> Result<(), TrusteeError> {
         let response: WrappedResponse = if self.info.index == 1 {
             // if index 1, get the raw votes
-            client.get(&format!("{}/{}/tally/vote", &self.info.api_base_addr, &self.info.session_id))
+            self.info.client.get(&format!("{}/{}/tally/vote", &self.info.api_base_addr, &self.info.session_id))
                 .send().await?
                 .json().await?
         } else {
             // otherwise, get the output of the previous mix
-            client.get(&format!("{}/{}/tally/vote_mix/{}", &self.info.api_base_addr, &self.info.session_id, self.info.index - 1))
+            self.info.client.get(&format!("{}/{}/tally/vote_mix/{}", &self.info.api_base_addr, &self.info.session_id, self.info.index - 1))
                 .send().await?
                 .json().await?
         };
 
         if !response.status {
-            eprintln!("error getting votes: {:?}", response.msg);
-            return Err(TrusteeError::Api);
+            return Err(TrusteeError::FailedResponse(response.msg));
         }
 
         println!("#{}: Votes downloaded", self.info.index);
 
-        let result = match response.msg {
+        let votes = match response.msg {
             Response::Ciphertexts(cts) => cts,
             _ => {
                 return Err(TrusteeError::InvalidResponse);
@@ -715,8 +482,8 @@ impl Trustee {
         };
 
         let mut ctx = self.info.ctx.clone();
-        let (commit_ctx, generators) = PedersenCtx::with_generators(self.info.session_id.as_bytes(), result.len());
-        let shuffle = Shuffle::new(ctx.clone(), result, &self.info.pubkey)?;
+        let (commit_ctx, generators) = PedersenCtx::with_generators(self.info.session_id.as_bytes(), votes.len());
+        let shuffle = Shuffle::new(ctx.clone(), votes.to_vec(), &self.info.pubkey)?;
         println!("#{}: Shuffled", self.info.index);
         let proof = shuffle.gen_proof(&mut ctx, &commit_ctx, &generators, &self.info.pubkey)?;
         println!("#{}: Generated proof", self.info.index);
@@ -739,109 +506,265 @@ impl Trustee {
         }
 
         // send shuffle
-        let inner = TrusteeMessage::EcVoteMix {
-            mix_index: self.info.index as i16,
-            enc_votes,
-            enc_voter_ids,
-            enc_as,
-            enc_bs,
-            enc_r_as,
-            enc_r_bs,
-            proof,
-        };
-        let data = serde_json::to_string(&inner)?.as_bytes().to_vec();
-        let signature = self.info.signing_keypair.sign(&data).as_ref().to_vec();
-
-        let msg = SignedMessage {
-            inner,
-            signature,
-            sender_id: self.info.id.clone()
-        };
-
-        // Construct multipart form
-        let bytes = serde_json::to_string(&msg)?;
-        let bytes = bytes.as_bytes().to_vec();
-        let form = Form::new().part("msg", Part::bytes(bytes.clone()));
-
-        let res: WrappedResponse = client.post(&format!("{}/{}/tally/vote_mix", &self.info.api_base_addr, &self.info.session_id))
-            .multipart(form)
-            .send().await?
-            .json().await?;
-
-        if !res.status {
-            eprintln!("error getting votes: {:?}", res.msg);
-        }
-
+        api::post_shuffle(&self.info, enc_votes, enc_voter_ids, enc_as, enc_bs, enc_r_as, enc_r_bs, proof).await?;
         println!("#{}: Uploaded shuffle", self.info.index);
         Ok(())
     }
 
-    pub async fn decrypt_first_mix(&self) -> Result<(), TrusteeError> {
-        // download votes
-        let client = reqwest::Client::builder()
-            .gzip(true)
-            .timeout(Duration::from_secs(60))
-            .build().map_err(|_| TrusteeError::InvalidState)?;
-
-        let response: WrappedResponse = client.get(&format!("{}/{}/tally/vote_mix/{}", &self.info.api_base_addr, &self.info.session_id, self.party.trustee_count()))
-            .send().await?
-            .json().await?;
-
-        if !response.status {
-            eprintln!("error getting votes: {:?}", response.msg);
-            return Err(TrusteeError::Api);
+    async fn download_votes(&mut self) -> Result<(), TrusteeError> {
+        if self.downloaded_votes.is_some() {
+            return Ok(());
         }
 
-        let result = match response.msg {
-            Response::Ciphertexts(cts) => cts,
-            _ => {
-                return Err(TrusteeError::InvalidResponse);
-            }
-        };
+        // Download and cache the votes
+        let votes = api::get_votes(&self.info, &self.party).await?;
+        self.downloaded_votes.replace(votes);
+        Ok(())
+    }
+
+    pub async fn decrypt_first_mix(&mut self) -> Result<(), TrusteeError> {
+        self.download_votes().await?;
+        let votes = self.downloaded_votes.as_ref().unwrap();
 
         // Generate decryption shares
         let mut decrypt_shares: Vec<Vec<_>> = Vec::new();
-        decrypt_shares.par_extend(result.into_par_iter().map(|mut row| {
+        decrypt_shares.par_extend(votes.into_par_iter().map(|row| {
             // Need to decrypt all but the first element
-            row.remove(0);
-            row.iter()
+            let mut row_shares: Vec<_> = row.iter()
                 .map(|ct| self.party.decrypt_share(&ct))
-                .collect()
+                .collect();
+            row_shares.remove(0);
+            row_shares
         }));
 
-        let inner = TrusteeMessage::EcVoteDecrypt {
-            signatures: decrypt_shares.iter().map(|shares| {
-                let string = shares.iter()
-                    .map(|share| serde_json::to_string(share).unwrap())
-                    .collect::<Vec<_>>()
-                    .join(":");
-                self.info.signing_keypair.sign(string.as_bytes()).as_ref().to_vec()
-            }).collect(),
-            shares: decrypt_shares,
-        };
-        let data = serde_json::to_string(&inner)?.as_bytes().to_vec();
-        let signature = self.info.signing_keypair.sign(&data).as_ref().to_vec();
+        let signatures = decrypt_shares.iter().map(|shares| {
+            let string = shares.iter()
+                .map(|share| serde_json::to_string(share).unwrap())
+                .collect::<Vec<_>>()
+                .join(":");
+            self.info.signing_keypair.sign(string.as_bytes()).as_ref().to_vec()
+        }).collect();
 
-        let msg = SignedMessage {
-            inner,
-            signature,
-            sender_id: self.info.id.clone()
-        };
+        api::post_decrypt_shares(&self.info, signatures, decrypt_shares).await?;
 
-        // Construct multipart form
-        let bytes = serde_json::to_string(&msg)?;
-        let bytes = bytes.as_bytes().to_vec();
-        let form = Form::new().part("msg", Part::bytes(bytes.clone()));
+        Ok(())
+    }
 
-        let res: WrappedResponse = client.post(&format!("{}/{}/tally/vote_mix/decrypt", &self.info.api_base_addr, &self.info.session_id))
-            .multipart(form)
-            .send().await?
-            .json().await?;
+    async fn decrypt_votes(&self, votes: &[Vec<Ciphertext>]) -> Result<Vec<Vec<CurveElem>>, TrusteeError> {
+        // Download decryption shares
+        let decrypt_shares = api::get_decrypt_shares(&self.info).await?;
 
-        if !res.status {
-            eprintln!("error getting votes: {:?}", res.msg);
+        // Perform decryption using the posted shares
+        let mut rows = Vec::new();
+        for (vote, shares) in votes.iter().zip(decrypt_shares) {
+            let mut decryptions = vec![
+                Decryption::new(self.party.min_trustees(), &self.info.ctx, &vote[1]),
+                Decryption::new(self.party.min_trustees(), &self.info.ctx, &vote[2]),
+                Decryption::new(self.party.min_trustees(), &self.info.ctx, &vote[3]),
+                Decryption::new(self.party.min_trustees(), &self.info.ctx, &vote[4]),
+                Decryption::new(self.party.min_trustees(), &self.info.ctx, &vote[5])
+            ];
+            for (trustee_id, _, these_shares) in shares {
+                let info = &self.trustee_info[&trustee_id];
+
+                for (dec, share) in decryptions.iter_mut().zip(these_shares) {
+                    dec.add_share(info.index, &info.pubkey_proof.as_ref().unwrap(), &share);
+                }
+            }
+
+            match decryptions.into_iter()
+                .map(|dec| dec.finish())
+                .collect::<Result<Vec<_>, _>>() {
+                Ok(results) => {
+                    rows.push(results);
+                },
+                Err(e) => {
+                    eprintln!("Decryption failed for a vote: {}", e);
+                }
+            }
         }
 
+        Ok(rows)
+    }
+
+    pub async fn validate_votes(&mut self) -> Result<Vec<PetData>, TrusteeError> {
+        self.download_votes().await?;
+        let votes = self.downloaded_votes.as_ref().unwrap();
+        let decrypted = self.decrypt_votes(&votes).await?;
+
+        // Decode decryptions
+        let mut rows = Vec::new();
+        let mut voter_id_counts = HashMap::new();
+
+        for mut row in decrypted.into_iter() {
+            if let Ok(voter_id) = VoterId::try_from(row[0]) {
+                *voter_id_counts.entry(voter_id.clone())
+                    .or_insert(0usize) += 1;
+
+                let r_b = row.remove(4);
+                let b = row.remove(3);
+                let r_a = row.remove(2);
+                let a = row.remove(1);
+                rows.push((voter_id, a, r_a, b, r_b));
+            } else {
+                eprintln!("Decoding voter ID failed.");
+            }
+        }
+
+        // Get commitments
+        let ec_commits = api::get_ec_commitments(&self.info).await?;
+        let mut ec_commit_map = HashMap::new();
+        for (voter_id, enc_mac, enc_vote) in ec_commits {
+            ec_commit_map.entry(voter_id)
+                .or_insert(Vec::new())
+                .push((enc_mac, enc_vote));
+        }
+
+        // Check uniqueness of IDs and EC commitments
+        let unique_rows: Vec<_> = rows.into_iter()
+            .filter(|(voter_id, _, _, _, _)| voter_id_counts[voter_id] == 1)
+            .collect();
+
+        // Get idents
+        let idents = api::get_idents(&self.info).await?;
+        let mut ident_map = HashMap::new();
+        for (voter_id, c_a, c_b) in idents {
+            ident_map.entry(voter_id)
+                .or_insert(Vec::new())
+                .push((c_a, c_b));
+        }
+
+        // Verify the commitments from the voter and EC to produce a set of votes for PETing
+        let mut to_pet: Vec<PetInstance> = Vec::new();
+
+        for (i, (voter_id, a, b, r_a, r_b)) in unique_rows.into_iter().enumerate() {
+            if let Some(commits) = ident_map.get(&voter_id) {
+                if let Some(ec_commits) = ec_commit_map.get(&voter_id) {
+                    let voter_id_copy = voter_id.clone();
+                    let (enc_mac, enc_vote) = ec_commits[0].clone();
+
+                    let mut matched = false;
+                    for (c_a, c_b) in commits {
+                        if c_a.validate(&self.info.commit_ctx, &a.into(), &r_a.into())
+                                && c_b.validate(&self.info.commit_ctx, &b.into(), &r_b.into()) {
+                            // Commitments validated
+                            let enc_received_vote = votes[i][0].clone();
+                            to_pet.push(PetInstance {
+                                voter_id, enc_mac, enc_vote, enc_received_vote,
+                                a: a.into(), b: b.into()
+                            });
+                            matched = true;
+                            break;
+                        }
+                    }
+
+                    if !matched {
+                        eprintln!("No valid commitment for {}.", voter_id_copy);
+                    }
+                } else {
+                    eprintln!("No EC commitment for {}.", voter_id);
+                }
+            } else {
+                eprintln!("No commitment for {}.", voter_id);
+            }
+        }
+
+        println!("Vote validation and matching done, {} votes need to be PET'd.", to_pet.len());
+
+        Ok(self.do_pet_commits(to_pet).await?)
+    }
+
+    async fn do_pet_commits(&self, to_test: Vec<PetInstance>) -> Result<Vec<PetData>, TrusteeError> {
+        let mut data = Vec::new();
+        data.par_extend(to_test.into_par_iter().map(|test| {
+            // Construct vote commitment
+            let vote_quotient_c1 = test.enc_received_vote.c1 - test.enc_vote.c1;
+            let vote_quotient_c2 = test.enc_received_vote.c2 - test.enc_vote.c2;
+            let vote_ct = Ciphertext {
+                c1: vote_quotient_c1, c2: vote_quotient_c2
+            };
+
+            let blind = self.info.ctx.random_scalar();
+            let vote_blind = (vote_quotient_c1.scaled(&blind), vote_quotient_c2.scaled(&blind));
+            let vote_r = (self.info.ctx.random_scalar(), self.info.ctx.random_scalar());
+            let vote_commit = (self.info.commit_ctx.commit(&vote_blind.0.into(), &vote_r.0),
+                               self.info.commit_ctx.commit(&vote_blind.1.into(), &vote_r.1));
+
+            let vote_proof = PrfEqDlogs::new(&self.info.ctx, &vote_quotient_c1, &vote_quotient_c2, &vote_blind.0, &vote_blind.1, &blind);
+            assert!(vote_proof.verify());
+
+            // Reconstruct the MAC
+            let enc_b = self.info.pubkey.encrypt(&self.info.ctx, &test.b, &Scalar::zero());
+            let mac_c1 = test.enc_vote.c1.scaled(&test.a.into()) + enc_b.c1;
+            let mac_c2 = test.enc_vote.c2.scaled(&test.a.into()) + enc_b.c2;
+
+            // Construct MAC commitment
+            let mac_quotient_c1 = test.enc_mac.c1 - mac_c1;
+            let mac_quotient_c2 = test.enc_mac.c2 - mac_c2;
+            let mac_ct = Ciphertext {
+                c1: mac_quotient_c1, c2: mac_quotient_c2
+            };
+
+            let blind = self.info.ctx.random_scalar();
+            let mac_blind = (mac_quotient_c1.scaled(&blind), mac_quotient_c2.scaled(&blind));
+            let mac_r = (self.info.ctx.random_scalar(), self.info.ctx.random_scalar());
+            let mac_commit = (self.info.commit_ctx.commit(&mac_blind.0.into(), &mac_r.0),
+                              self.info.commit_ctx.commit(&mac_blind.1.into(), &mac_r.1));
+
+            let mac_proof = PrfEqDlogs::new(&self.info.ctx, &mac_quotient_c1, &mac_quotient_c2, &mac_blind.0, &mac_blind.1, &blind);
+            assert!(mac_proof.verify());
+
+            PetData {
+                voter_id: test.voter_id,
+                vote_ct,
+                vote_r,
+                mac_ct,
+                mac_r,
+                vote_proof,
+                mac_proof,
+                vote_commit,
+                mac_commit,
+            }
+        }));
+
+        // Post commitments
+        self.post_pet_commitments(&data).await?;
+
+        Ok(data)
+    }
+
+    async fn post_pet_commitments(&self, data: &[PetData]) -> Result<(), TrusteeError> {
+        let mut voter_ids = Vec::new();
+        let mut vote_commits = Vec::new();
+        let mut mac_commits = Vec::new();
+        let mut signatures = Vec::new();
+
+        for row in data {
+            let voter_id = row.voter_id.clone();
+            let vote_commit = row.vote_commit.clone();
+            let mac_commit = row.mac_commit.clone();
+
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(voter_id.to_string().as_bytes());
+            bytes.extend_from_slice(vote_commit.0.to_string().as_bytes());
+            bytes.extend_from_slice(vote_commit.1.to_string().as_bytes());
+            bytes.extend_from_slice(mac_commit.0.to_string().as_bytes());
+            bytes.extend_from_slice(mac_commit.1.to_string().as_bytes());
+
+            let signature = self.info.signing_keypair.sign(&bytes).as_ref().to_vec();
+
+            voter_ids.push(voter_id);
+            vote_commits.push(vote_commit);
+            mac_commits.push(mac_commit);
+            signatures.push(signature);
+        }
+
+        api::post_pet_commits(&self.info, voter_ids, vote_commits, mac_commits, signatures).await?;
+
+        Ok(())
+    }
+
+    pub async fn do_pet_openings(&self, data: Vec<PetData>) -> Result<(), TrusteeError> {
         Ok(())
     }
 }

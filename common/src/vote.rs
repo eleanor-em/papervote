@@ -1,11 +1,14 @@
 use cryptid::zkp::PrfKnowDlog;
 use cryptid::elgamal::{Ciphertext, CurveElem};
-use cryptid::Scalar;
-use std::convert::TryInto;
+use cryptid::{Scalar, CryptoError};
+use std::convert::{TryInto, TryFrom};
 use std::collections::HashMap;
 
 use serde::{Serialize, Deserialize};
 use cryptid::commit::Commitment;
+use std::fmt::Display;
+use serde::export::Formatter;
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct Candidate {
@@ -86,12 +89,36 @@ impl ToString for Vote {
         result.into_iter().collect()
     }
 }
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Hash, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct VoterId(String);
 
-impl ToString for VoterId {
-    fn to_string(&self) -> String {
-        self.0.clone()
+impl Display for VoterId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<String> for VoterId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl TryFrom<CurveElem> for VoterId {
+    type Error = CryptoError;
+
+    fn try_from(value: CurveElem) -> Result<Self, Self::Error> {
+        let scalar = value.decoded()?;
+        let mut bytes = scalar.as_bytes().to_vec();
+        // assume null terminated
+        for i in 0..bytes.len() {
+            if bytes[i] == 0 {
+                bytes.truncate(i);
+                break;
+            }
+        }
+
+        Ok(Self(String::from_utf8(bytes).map_err(|_| CryptoError::Decoding)?))
     }
 }
 
@@ -140,4 +167,18 @@ pub enum VoterMessage {
         prf_know_vote: PrfKnowDlog,
     },
     Ballot(Ballot),
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::vote::VoterId;
+    use std::convert::TryFrom;
+
+    #[test]
+    fn test_voter_id_serde() {
+        let id = VoterId("hello world".to_string());
+        let encoded = id.try_as_curve_elem().unwrap();
+        let decoded = VoterId::try_from(encoded).unwrap();
+        assert_eq!(id, decoded);
+    }
 }

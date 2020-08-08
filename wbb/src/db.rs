@@ -3,8 +3,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use cryptid::{AsBase64, Scalar};
-use cryptid::elgamal::{PublicKey, Ciphertext, CurveElem};
-use cryptid::threshold::{KeygenCommitment, DecryptShare};
+use cryptid::elgamal::{PublicKey, Ciphertext};
+use cryptid::threshold::{KeygenCommitment, DecryptShare, PubkeyProof};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -15,6 +15,8 @@ use common::net::{TrusteeMessage, TrusteeInfo};
 use common::vote::VoterId;
 use cryptid::commit::Commitment;
 use cryptid::shuffle::ShuffleProof;
+use std::collections::HashMap;
+use cryptid::zkp::PrfEqDlogs;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -104,7 +106,7 @@ impl DbClient {
                 id              SERIAL PRIMARY KEY,
                 session         UUID NOT NULL,
                 trustee         UUID NOT NULL,
-                pubkey_share    TEXT NOT NULL UNIQUE,
+                pubkey_proof    TEXT NOT NULL UNIQUE,
                 signature       TEXT NOT NULL UNIQUE,
                 CONSTRAINT      unqiue_trustee_keygen_sig UNIQUE(session, trustee)
             );
@@ -178,6 +180,16 @@ impl DbClient {
                 share           TEXT UNIQUE NOT NULL,
                 CONSTRAINT      unique_wbb_votes_decrypt UNIQUE(session, index, trustee)
             );
+            CREATE TABLE IF NOT EXISTS wbb_pet_commits (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                trustee         UUID NOT NULL,
+                voter_id        TEXT NOT NULL,
+                vote_commit     TEXT UNIQUE NOT NULL,
+                mac_commit      TEXT UNIQUE NOT NULL,
+                signature       TEXT UNIQUE NOT NULL,
+                CONSTRAINT      unique_wbb_pet_commits UNIQUE(session, trustee, voter_id)
+            );
         ").await?;
 
         Ok(())
@@ -234,7 +246,7 @@ impl DbClient {
         }
     }
 
-    pub async fn insert_pubkey_sig(&self, session: &Uuid, trustee: &Uuid, pubkey: &PublicKey, pubkey_share: &CurveElem, signature: &[u8]) -> Result<(), DbError> {
+    pub async fn insert_pubkey_sig(&self, session: &Uuid, trustee: &Uuid, pubkey: &PublicKey, pubkey_proof: &PubkeyProof, signature: &[u8]) -> Result<(), DbError> {
         // For conflicts, don't worry because we only care about the signatures
         self.client.execute("
             INSERT INTO parameters(session, pubkey)
@@ -243,12 +255,12 @@ impl DbClient {
         ", &[&session, &pubkey.as_base64()]).await?;
 
         let result = self.client.execute("
-            INSERT INTO parameter_signatures(session, trustee, pubkey_share, signature)
+            INSERT INTO parameter_signatures(session, trustee, pubkey_proof, signature)
             VALUES($1, $2, $3, $4);
         ", &[
             &session,
             &trustee,
-            &pubkey_share.as_base64(),
+            &pubkey_proof.as_base64(),
             &base64::encode(signature)
         ]).await?;
 
@@ -348,7 +360,7 @@ impl DbClient {
         }
         let result = self.client.execute("
             INSERT INTO wbb_votes_mix_proofs(session, mix_index, proof, signed_by, signature)
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5);
         ", &[session, &mix_index, &proof.to_string(), signed_by, &base64::encode(signature)]).await?;
 
         if result > 0 {
@@ -367,7 +379,7 @@ impl DbClient {
         for i in 0..shares.len() {
             if self.client.execute("
                 INSERT INTO wbb_votes_decrypt(session, index, trustee, signature, share)
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, $5);
             ", &[session, &(i as i32), trustee, &base64::encode(&signatures[i]),
                 &serde_json::to_string(&shares[i])
                     .map_err(|_| DbError::SchemaFailure("share"))?
@@ -377,6 +389,30 @@ impl DbClient {
         }
 
         Ok(())
+    }
+
+    pub async fn insert_ec_pet_commits(&self,
+                                       session: &Uuid,
+                                       trustee: &Uuid,
+                                       voter_ids: &[VoterId],
+                                       vote_commits: &[(Commitment, Commitment)],
+                                       mac_commits: &[(Commitment, Commitment)],
+                                       signatures: &[Vec<u8>]
+    ) -> Result<(), DbError> {
+        for i in 0..signatures.len() {
+            if self.client.execute("
+                INSERT INTO wbb_pet_commits(session, trustee, voter_id, vote_commit_1, vote_commit_2, mac_commit_1, mac_commit_2, signature)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+            ", &[session, trustee, &voter_ids[i].to_string(), &vote_commits[i].0.to_string(),
+                &vote_commits[i].1.to_string(), &mac_commits[i].0.to_string(),
+                &mac_commits[i].1.to_string(), &base64::encode(&signatures[i])])
+            .await? == 0 {
+                return Err(DbError::InsertAlreadyExists);
+            }
+        }
+
+        Ok(())
+
     }
 
     pub async fn count_trustees(&self, session: &Uuid) -> Result<usize, DbError> {
@@ -422,7 +458,7 @@ impl DbClient {
             let info = TrusteeInfo {
                 id: uuid.clone(),
                 pubkey,
-                pubkey_share: None, // Assume this isn't being used
+                pubkey_proof: None, // Assume this isn't being used
                 index: index as usize,
                 address
             };
@@ -451,7 +487,7 @@ impl DbClient {
             let info = TrusteeInfo {
                 id,
                 pubkey,
-                pubkey_share: None,
+                pubkey_proof: None,
                 index: index as usize,
                 address
             };
@@ -496,7 +532,7 @@ impl DbClient {
             .map_err(|_| DbError::SchemaFailure("pubkey"))?;
 
         let rows = self.client.query("
-            SELECT trustee, pubkey_share, signature
+            SELECT trustee, pubkey_proof, signature
             FROM parameter_signatures
             WHERE session=$1;
         ", &[&session]).await?;
@@ -507,11 +543,11 @@ impl DbClient {
             let signature: String = row.get("signature");
             let signature: Vec<u8> = base64::decode(&signature)
                 .map_err(|_| DbError::SchemaFailure("signature"))?;
-            let pubkey_share: String = row.get("pubkey_share");
-            let pubkey_share = CurveElem::try_from_base64(pubkey_share.as_str())
-                .map_err(|_| DbError::SchemaFailure("pubkey_share"))?;
+            let pubkey_proof: String = row.get("pubkey_proof");
+            let pubkey_proof = PubkeyProof::try_from_base64(pubkey_proof.as_str())
+                .map_err(|_| DbError::SchemaFailure("pubkey_proof"))?;
 
-            let inner = TrusteeMessage::KeygenSign { pubkey, pubkey_share };
+            let inner = TrusteeMessage::KeygenSign { pubkey, pubkey_proof };
 
             result.push(SignedMessage {
                 inner,
@@ -556,7 +592,7 @@ impl DbClient {
             SELECT enc_vote, enc_voter_id, enc_param_a, enc_param_b, enc_param_r_a, enc_param_r_b
             FROM wbb_votes_mix
             WHERE session=$1 AND mix_index=$2
-            ORDER BY index
+            ORDER BY index;
         ", &[session, &mix_index]).await?;
 
         let mut result = Vec::new();
@@ -579,6 +615,181 @@ impl DbClient {
         Ok(result)
     }
 
+    pub async fn get_decrypt(&self, session: &Uuid) -> Result<Vec<Vec<(Uuid, Vec<u8>, Vec<DecryptShare>)>>, DbError> {
+        let rows = self.client.query("
+            SELECT trustee, signature, share, index
+            FROM wbb_votes_decrypt
+            WHERE session=$1
+            ORDER BY index;
+        ", &[session]).await?;
+
+        let mut share_map = HashMap::new();
+
+        for row in rows {
+            let trustee = row.get("trustee");
+
+            let signature: String = row.get("signature");
+            let signature = base64::decode(signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
+
+            let share: String = row.get("share");
+            let share: Vec<DecryptShare> = serde_json::from_str(share.as_str())
+                .map_err(|_| DbError::SchemaFailure("share"))?;
+
+            let index: i32 = row.get("index");
+            share_map.entry(index).or_insert(Vec::new())
+                .push((trustee, signature, share));
+        }
+
+        let mut indices = share_map.keys().collect::<Vec<_>>();
+        indices.sort();
+
+        let mut result = Vec::new();
+        for index in indices.into_iter() {
+            result.push(share_map[index].clone());
+        }
+
+        Ok(result)
+    }
+
+    pub async fn get_all_idents(&self, session: &Uuid) -> Result<Vec<(VoterId, Commitment, Commitment)>, DbError> {
+        // Below only errors if not found
+        let rows = self.client.query("
+            SELECT voter_id, c_a, c_b FROM wbb_idents WHERE session=$1;
+        ", &[session]).await.map_err(|_| DbError::NotEnoughRows)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let voter_id: String = row.get("voter_id");
+            let voter_id = VoterId::from(voter_id);
+
+            let c_a: String = row.get("c_a");
+            let c_a = Commitment::try_from(c_a)
+                .map_err(|_| DbError::SchemaFailure("c_a"))?;
+
+            let c_b: String = row.get("c_b");
+            let c_b = Commitment::try_from(c_b)
+                .map_err(|_| DbError::SchemaFailure("c_b"))?;
+
+            result.push((voter_id, c_a, c_b));
+        }
+
+        Ok(result)
+    }
+
+    pub async fn get_all_ec_commits(&self, session: &Uuid) -> Result<Vec<SignedMessage>, DbError> {
+        let rows = self.client.query("
+            SELECT voter_id, enc_mac, enc_vote, signed_by, signature FROM wbb_commits WHERE session=$1;
+        ", &[session]).await?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let voter_id: String = row.get("voter_id");
+            let voter_id = VoterId::from(voter_id);
+
+            let enc_mac: String = row.get("enc_mac");
+            let enc_mac = Ciphertext::try_from(enc_mac)
+                .map_err(|_| DbError::SchemaFailure("enc_mac"))?;
+
+            let enc_vote: String = row.get("enc_vote");
+            let enc_vote = Ciphertext::try_from(enc_vote)
+                .map_err(|_| DbError::SchemaFailure("enc_vote"))?;
+
+            let sender_id = row.get("signed_by");
+
+            let signature: String = row.get("signature");
+            let signature = base64::decode(signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
+
+            let inner = TrusteeMessage::EcCommit { voter_id, enc_mac, enc_vote };
+
+            result.push(SignedMessage {
+                inner,
+                signature,
+                sender_id,
+            });
+        }
+
+        Ok(result)
+    }
+
+    pub async fn get_all_ec_pet_commits(&self, session: &Uuid) -> Result<HashMap<Uuid, TrusteeMessage>, DbError> {
+        let rows = self.client.query("
+        SELECT trustee, voter_id, vote_commit_1, vote_commit_2, mac_commit_1, mac_commit_2, signature
+        FROM wbb_pet_commits
+        WHERE session=$1;", &[session]).await?;
+
+        let mut voter_ids = HashMap::new();
+        let mut vote_commits = HashMap::new();
+        let mut mac_commits = HashMap::new();
+        let mut signatures = HashMap::new();
+
+        for row in rows {
+            let trustee: Uuid = row.get("trustee");
+
+            let voter_id: String = row.get("voter_id");
+            let voter_id = VoterId::from(voter_id);
+
+            let mac_commit_1: String = row.get("mac_commit_1");
+            let mac_commit_1 = Commitment::try_from(mac_commit_1)
+                .map_err(|_| DbError::SchemaFailure("mac_commit_1"))?;
+
+            let mac_commit_2: String = row.get("mac_commit_2");
+            let mac_commit_2 = Commitment::try_from(mac_commit_2)
+                .map_err(|_| DbError::SchemaFailure("mac_commit_2"))?;
+
+            let vote_commit_1: String = row.get("vote_commit_1");
+            let vote_commit_1 = Commitment::try_from(vote_commit_1)
+                .map_err(|_| DbError::SchemaFailure("vote_commit_1"))?;
+
+            let vote_commit_2: String = row.get("vote_commit_2");
+            let vote_commit_2 = Commitment::try_from(vote_commit_2)
+                .map_err(|_| DbError::SchemaFailure("vote_commit_2"))?;
+
+            let signature: String = row.get("signature");
+            let signature = base64::decode(signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
+
+            voter_ids.entry(trustee)
+                .or_insert(Vec::new())
+                .push(voter_id);
+
+            vote_commits.entry(trustee)
+                .or_insert(Vec::new())
+                .push((vote_commit_1, vote_commit_2));
+
+            mac_commits.entry(trustee)
+                .or_insert(Vec::new())
+                .push((mac_commit_1, mac_commit_2));
+
+            signatures.entry(trustee)
+                .or_insert(Vec::new())
+                .push(signature);
+        }
+
+        let mut messages = HashMap::new();
+
+        // Collect trustees from hashmap
+        let mut trustees = Vec::new();
+        for trustee in voter_ids.keys() {
+            trustees.push(trustee.clone());
+        }
+
+        for trustee in trustees {
+            let msg = TrusteeMessage::EcPetCommit {
+                voter_ids: voter_ids.remove(&trustee).unwrap(),
+                vote_commits: vote_commits.remove(&trustee).unwrap(),
+                mac_commits: mac_commits.remove(&trustee).unwrap(),
+                signatures: signatures.remove(&trustee).unwrap(),
+            };
+
+            messages.insert(trustee, msg);
+        }
+
+        Ok(messages)
+
+    }
+
     pub async fn find_ec_commit(&self, session: &Uuid, voter: String) -> Result<bool, DbError> {
         let row = self.client.query_one("
             SELECT EXISTS(SELECT 1 FROM wbb_commits WHERE session=$1 AND voter_id=$2);
@@ -591,7 +802,8 @@ impl DbClient {
         self.client.execute("
             DROP TABLE IF EXISTS
                 trustees, sessions, parameters, parameter_signatures, keygen_commitments,
-                wbb_idents, wbb_commits, wbb_votes, wbb_votes_mix, wbb_votes_mix_proofs
+                wbb_idents, wbb_commits, wbb_votes, wbb_votes_mix, wbb_votes_mix_proofs,
+                wbb_votes_decrypt, wbb_failed_votes
             CASCADE;
         ", &[]).await?;
 

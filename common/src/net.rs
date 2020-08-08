@@ -1,11 +1,14 @@
 use crate::sign::{SignedMessage, SigningPubKey};
 use uuid::Uuid;
-use cryptid::threshold::{KeygenCommitment, DecryptShare};
+use cryptid::threshold::{KeygenCommitment, DecryptShare, PubkeyProof};
 use cryptid::Scalar;
-use cryptid::elgamal::{PublicKey, Ciphertext, CurveElem};
+use cryptid::elgamal::{PublicKey, Ciphertext};
 use serde::{Serialize, Deserialize};
 use crate::vote::VoterId;
 use cryptid::shuffle::ShuffleProof;
+use cryptid::commit::Commitment;
+use cryptid::zkp::PrfEqDlogs;
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TrusteeMessage {
@@ -20,7 +23,7 @@ pub enum TrusteeMessage {
     },
     KeygenSign {
         pubkey: PublicKey,
-        pubkey_share: CurveElem,
+        pubkey_proof: PubkeyProof,
     },
     EcCommit {
         voter_id: VoterId,
@@ -50,14 +53,26 @@ pub enum TrusteeMessage {
     EcVoteDecrypt {
         signatures: Vec<Vec<u8>>,
         shares: Vec<Vec<DecryptShare>>,
-    }
+    },
+    EcPetCommit {
+        voter_ids: Vec<VoterId>,
+        vote_commits: Vec<(Commitment, Commitment)>,
+        mac_commits: Vec<(Commitment, Commitment)>,
+        signatures: Vec<Vec<u8>>,
+    },
+    EcPetOpening {
+        voter_ids: Vec<VoterId>,
+        vote_openings: Vec<(Ciphertext, Scalar, Scalar)>,
+        mac_openings: Vec<(Ciphertext, Scalar, Scalar)>,
+        signatures: Vec<Vec<u8>>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TrusteeInfo {
     pub id: Uuid,
     pub pubkey: SigningPubKey,
-    pub pubkey_share: Option<CurveElem>,
+    pub pubkey_proof: Option<PubkeyProof>,
     pub index: usize,
     pub address: String,
 }
@@ -75,7 +90,6 @@ impl TrusteeInfo {
     }
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WrappedResponse {
     pub status: bool,
@@ -87,6 +101,9 @@ pub enum Response {
     PublicKey(SigningPubKey),
     ResultSet(Vec<SignedMessage>),
     Ciphertexts(Vec<Vec<Ciphertext>>),
+    DecryptShares(Vec<Vec<(Uuid, Vec<u8>, Vec<DecryptShare>)>>),
+    Idents(Vec<(VoterId, Commitment, Commitment)>),
+    PetCommits(HashMap<Uuid, TrusteeMessage>),
     Outcome(bool),
     Ok,
     SessionExists,
