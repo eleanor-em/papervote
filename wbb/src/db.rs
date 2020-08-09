@@ -18,6 +18,7 @@ use cryptid::shuffle::ShuffleProof;
 use std::collections::HashMap;
 use common::trustee::{EcCommit, CtOpening, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare, SignedDecryptShare, AcceptedMixRow, AcceptedRow};
 use cryptid::zkp::PrfEqDlogs;
+use itertools::Itertools;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -834,7 +835,7 @@ impl DbClient {
                 .push(SignedDecryptShareSet { trustee_id, signature, shares });
         }
 
-        let mut indices = share_map.keys().collect::<Vec<_>>();
+        let mut indices = share_map.keys().collect_vec();
         indices.sort();
 
         let mut result = Vec::new();

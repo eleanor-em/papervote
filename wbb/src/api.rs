@@ -996,7 +996,8 @@ fn post_tally_inner(state: State<'_, Api>, content_type: &ContentType,  session:
     // Verify the signature to ensure this was sent by an EC rep
     let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
         .map_err(|_| failure(Response::InvalidSignature))?;
-    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+
+    if !msg.verify_sorted(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
         return Err(failure(Response::InvalidSignature));
     }
 

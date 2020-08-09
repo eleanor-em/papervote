@@ -4,13 +4,28 @@ use cryptid::{Scalar, CryptoError};
 use std::convert::{TryInto, TryFrom};
 use std::collections::HashMap;
 
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize, de};
 use cryptid::commit::Commitment;
 use std::fmt::Display;
 use serde::export::Formatter;
 use std::fmt;
+use itertools::Itertools;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
+#[derive(Debug)]
+pub enum CandidateParseError {
+    Count,
+    Id,
+}
+
+impl Display for CandidateParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for CandidateParseError {}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Candidate {
     name: String,
     id: u64,
@@ -19,7 +34,8 @@ pub struct Candidate {
 impl Candidate {
     pub fn new(name: &str, id: u64) -> Self {
         Self {
-            name: name.to_string(), id
+            name: name.to_string(),
+            id,
         }
     }
 
@@ -29,6 +45,64 @@ impl Candidate {
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+}
+
+impl Display for Candidate {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.id, self.name)
+    }
+}
+
+impl TryFrom<&str> for Candidate {
+    type Error = CandidateParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let mut pieces = value.split(":").collect_vec();
+        if pieces.len() < 2 {
+            return Err(CandidateParseError::Count);
+        }
+
+        let id = pieces[0].parse::<u64>()
+            .map_err(|_| CandidateParseError::Id)?;
+        pieces.remove(0);
+
+        let name = pieces.join(":");
+
+        Ok(Self { id, name })
+    }
+}
+
+impl serde::Serialize for Candidate {
+    fn serialize<S>(&self, serializer: S) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>
+        where
+            S: serde::Serializer {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+pub struct CandidateVisitor;
+
+impl<'de> de::Visitor<'de> for CandidateVisitor {
+    type Value = Candidate;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("<id>:<name>")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error {
+        Candidate::try_from(value)
+            .map_err(|_| de::Error::custom("not a valid encoding"))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Candidate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as serde::Deserializer<'de>>::Error>
+        where
+            D: serde::Deserializer<'de> {
+        deserializer.deserialize_str(CandidateVisitor)
     }
 }
 
@@ -90,11 +164,11 @@ impl Vote {
     }
 
     pub fn pretty(&self) -> String {
-        let mut reversed = self.preferences.iter().collect::<Vec<_>>();
+        let mut reversed = self.preferences.iter().collect_vec();
         reversed.sort_by_key(|(_, key)| **key);
         let reversed = reversed.into_iter()
             .map(|(candidate, key)| (key + 1, candidate))
-            .collect::<Vec<_>>();
+            .collect_vec();
 
         let mut result = String::new();
         for (preference, candidate) in reversed.into_iter() {
@@ -117,6 +191,7 @@ impl ToString for Vote {
         result.into_iter().collect()
     }
 }
+
 #[derive(Hash, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct VoterId(String);
 

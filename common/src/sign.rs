@@ -70,6 +70,18 @@ impl SignedMessage {
             Err(_) => false,
         })
     }
+
+    // Used only to deal with the annoying fact that HashMaps are not serialised in a consistent order.
+    pub fn verify_sorted(&self, pub_key: &SigningPubKey) -> Result<bool, CryptoError> {
+        let pub_key = signature::UnparsedPublicKey::new(&signature::ED25519, &pub_key.bytes);
+        let mut ser = serde_json::to_string(&self.inner).map_err(|_| CryptoError::Misc)
+            .unwrap().as_bytes().to_vec();
+        ser.sort();
+        Ok(match pub_key.verify(&ser, &self.signature.0) {
+            Ok(_) => true,
+            Err(_) => false,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]

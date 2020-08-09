@@ -274,6 +274,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.12.3",
  "cryptid",
+ "itertools",
  "rand 0.7.3",
  "ring",
  "serde",
@@ -2656,6 +2657,7 @@ dependencies = [
  "confy",
  "cryptid",
  "futures",
+ "itertools",
  "rocket",
  "rocket-multipart-form-data",
  "rocket_contrib",

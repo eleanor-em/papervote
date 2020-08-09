@@ -364,7 +364,10 @@ pub async fn post_tally(
 ) -> Result<(), TrusteeError> {
     let inner = TrusteeMessage::Tally(votes);
 
-    let signature = sign(&info.signing_keypair, &inner)?;
+    // HashMaps are not serialised in a consistent order, so we have to do something a little weird here.
+    let mut data = serde_json::to_string(&inner)?.as_bytes().to_vec();
+    data.sort();
+    let signature = info.signing_keypair.sign(&data);
 
     let msg = SignedMessage {
         inner,
