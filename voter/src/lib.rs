@@ -175,9 +175,7 @@ impl Voter {
     }
 
     fn get_encoded_vote(&self) -> Option<Scalar> {
-        self.vote.as_ref()
-            .and_then(|vote| vote.clone().to_string().parse::<u128>().ok())
-            .map(|encoded| Scalar::from(encoded))
+        self.vote.as_ref().map(|vote| vote.encode())
     }
 
     fn get_mac(&self) -> Option<Scalar> {

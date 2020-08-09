@@ -44,6 +44,10 @@ impl Api {
                 post_pet_commits,
                 post_pet_openings,
                 post_pet_decryptions,
+                post_accepted,
+                post_accepted_mix,
+                post_accepted_decryptions,
+                post_tally,
                 get_ec_votes,
                 get_ec_mix_votes,
                 get_ec_vote_decrypt,
@@ -53,6 +57,10 @@ impl Api {
                 get_pet_commits,
                 get_pet_openings,
                 get_pet_decryptions,
+                get_accepted,
+                get_accepted_mix,
+                get_accepted_decryptions,
+                get_tally,
             ])
             .manage(self)
             .launch();
@@ -493,7 +501,7 @@ fn get_ec_vote_decrypt(state: State<'_, Api>, session: String) -> Json<WrappedRe
 fn get_ec_vote_decrypt_inner(state: State<'_, Api>, session: String) -> EitherResponse {
     let session = Uuid::from_str(&session)
         .map_err(|_| failure(Response::InvalidSession))?;
-    let results = executor::block_on(state.db.get_decrypt(&session))
+    let results = executor::block_on(state.db.get_vote_decrypt(&session))
         .map_err(|e| {
             eprintln!("Error: {}", e);
             failure(Response::MiscError)
@@ -748,4 +756,275 @@ fn get_pet_decryptions_inner(state: State<'_, Api>, session: String) -> EitherRe
             failure(Response::MiscError)
         })?;
     Ok(success(Response::PetDecryptions(results)))
+}
+
+#[rocket::post("/api/<session>/tally/accepted", data = "<data>")]
+fn post_accepted(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
+    respond(post_accepted_inner(state, content_type, session, data))
+}
+fn post_accepted_inner(state: State<'_, Api>, content_type: &ContentType,  session: String, data: Data) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    // parse multipart form
+    let options = MultipartFormDataOptions::with_multipart_form_data_fields(
+        vec! [
+            MultipartFormDataField::raw("msg").size_limit(1024 * 1024 * 40)
+        ]
+    );
+    let mut data = MultipartFormData::parse(content_type, data, options)
+        .map_err(|_| failure(Response::ParseError))?;
+    let msg = data.raw.remove("msg")
+        .ok_or(failure(Response::ParseError))?
+        .remove(0);
+    let msg: SignedMessage = serde_json::from_str(String::from_utf8(msg.raw)
+        .map_err(|_| failure(Response::ParseError))?
+        .as_str())
+        .map_err(|_| failure(Response::ParseError))?;
+
+    let rows = match &msg.inner {
+        TrusteeMessage::Accepted { rows } => Ok(rows),
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    let db = state.db.clone();
+
+    // Verify the signature to ensure this was sent by an EC rep
+    let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
+        .map_err(|_| failure(Response::InvalidSignature))?;
+    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+        return Err(failure(Response::InvalidSignature));
+    }
+
+    executor::block_on(db.insert_accepted(&session, &rows))
+        .map_err(|e| {
+            match e {
+                DbError::InsertAlreadyExists => failure(Response::FailedInsertion),
+                _ => {
+                    eprintln!("unexpected error: {}", e);
+                    failure(Response::MiscError)
+                }
+            }
+        })?;
+
+    Ok(success(Response::Ok))
+}
+
+#[rocket::get("/api/<session>/tally/accepted")]
+fn get_accepted(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_accepted_inner(state, session))
+}
+fn get_accepted_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.get_accepted(&session))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::AcceptedRows(results)))
+}
+
+#[rocket::post("/api/<session>/tally/accepted/mix", data = "<data>")]
+fn post_accepted_mix(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
+    respond(post_accepted_mix_inner(state, content_type, session, data))
+}
+fn post_accepted_mix_inner(state: State<'_, Api>, content_type: &ContentType,  session: String, data: Data) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    // parse multipart form
+    let options = MultipartFormDataOptions::with_multipart_form_data_fields(
+        vec! [
+            MultipartFormDataField::raw("msg").size_limit(1024 * 1024 * 40)
+        ]
+    );
+    let mut data = MultipartFormData::parse(content_type, data, options)
+        .map_err(|_| failure(Response::ParseError))?;
+    let msg = data.raw.remove("msg")
+        .ok_or(failure(Response::ParseError))?
+        .remove(0);
+    let msg: SignedMessage = serde_json::from_str(String::from_utf8(msg.raw)
+        .map_err(|_| failure(Response::ParseError))?
+        .as_str())
+        .map_err(|_| failure(Response::ParseError))?;
+
+    let (mix_index, rows, proof) = match &msg.inner {
+        TrusteeMessage::AcceptedMix { mix_index, rows, proof} => {
+            Ok((mix_index, rows, proof))
+        },
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    let db = state.db.clone();
+
+    // Verify the signature to ensure this was sent by an EC rep
+    let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
+        .map_err(|_| failure(Response::InvalidSignature))?;
+    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+        return Err(failure(Response::InvalidSignature));
+    }
+
+    executor::block_on(db.insert_accepted_mix(&session, *mix_index, &rows, &proof, &msg.sender_id, &msg.signature))
+        .map_err(|e| {
+            match e {
+                DbError::InsertAlreadyExists => failure(Response::FailedInsertion),
+                _ => {
+                    eprintln!("unexpected error: {}", e);
+                    failure(Response::MiscError)
+                }
+            }
+        })?;
+
+    Ok(success(Response::Ok))
+}
+
+#[rocket::get("/api/<session>/tally/accepted/mix/<mix_index>")]
+fn get_accepted_mix(state: State<'_, Api>, session: String, mix_index: i16) -> Json<WrappedResponse> {
+    respond(get_accepted_mix_inner(state, session, mix_index))
+}
+fn get_accepted_mix_inner(state: State<'_, Api>, session: String, mix_index: i16) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.get_accepted_mix(&session, mix_index))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::AcceptedMixRows(results)))
+}
+
+#[rocket::post("/api/<session>/tally/accepted/decrypt", data = "<data>")]
+fn post_accepted_decryptions(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
+    respond(post_accepted_decryptions_inner(state, content_type, session, data))
+}
+
+fn post_accepted_decryptions_inner(state: State<'_, Api>, content_type: &ContentType,  session: String, data: Data) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    // parse multipart form
+    let options = MultipartFormDataOptions::with_multipart_form_data_fields(
+        vec! [
+            MultipartFormDataField::raw("msg").size_limit(1024 * 1024 * 40)
+        ]
+    );
+    let mut data = MultipartFormData::parse(content_type, data, options)
+        .map_err(|_| failure(Response::ParseError))?;
+    let msg = data.raw.remove("msg")
+        .ok_or(failure(Response::ParseError))?
+        .remove(0);
+    let msg: SignedMessage = serde_json::from_str(String::from_utf8(msg.raw)
+        .map_err(|_| failure(Response::ParseError))?
+        .as_str())
+        .map_err(|_| failure(Response::ParseError))?;
+
+    let shares = match &msg.inner {
+        TrusteeMessage::AcceptedDecrypt { shares } => Ok(shares),
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    let db = state.db.clone();
+
+    // Verify the signature to ensure this was sent by an EC rep
+    let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
+        .map_err(|_| failure(Response::InvalidSignature))?;
+    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+        return Err(failure(Response::InvalidSignature));
+    }
+
+    executor::block_on(db.insert_accepted_decrypt(&session, &msg.sender_id, shares))
+        .map_err(|e| {
+            match e {
+                DbError::InsertAlreadyExists => failure(Response::FailedInsertion),
+                _ => {
+                    eprintln!("unexpected error: {}", e);
+                    failure(Response::MiscError)
+                }
+            }
+        })?;
+
+    Ok(success(Response::Ok))
+}
+
+#[rocket::get("/api/<session>/tally/accepted/decrypt")]
+fn get_accepted_decryptions(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_accepted_decryptions_inner(state, session))
+}
+fn get_accepted_decryptions_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.clone().get_all_accepted_decryptions(&session))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::AcceptedDecryptions(results)))
+}
+
+#[rocket::post("/api/<session>/tally/final", data = "<data>")]
+fn post_tally(state: State<'_, Api>, content_type: &ContentType, session: String, data: Data) -> Json<WrappedResponse> {
+    respond(post_tally_inner(state, content_type, session, data))
+}
+fn post_tally_inner(state: State<'_, Api>, content_type: &ContentType,  session: String, data: Data) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+
+    // parse multipart form
+    let options = MultipartFormDataOptions::with_multipart_form_data_fields(
+        vec! [
+            MultipartFormDataField::raw("msg").size_limit(1024 * 1024 * 40)
+        ]
+    );
+    let mut data = MultipartFormData::parse(content_type, data, options)
+        .map_err(|_| failure(Response::ParseError))?;
+    let msg = data.raw.remove("msg")
+        .ok_or(failure(Response::ParseError))?
+        .remove(0);
+    let msg: SignedMessage = serde_json::from_str(String::from_utf8(msg.raw)
+        .map_err(|_| failure(Response::ParseError))?
+        .as_str())
+        .map_err(|_| failure(Response::ParseError))?;
+
+    let (indexes, votes) = match &msg.inner {
+        TrusteeMessage::Tally { indexes, votes } => Ok((indexes, votes)),
+        _ => Err(failure(Response::InvalidRequest))
+    }?;
+
+    let db = state.db.clone();
+
+    // Verify the signature to ensure this was sent by an EC rep
+    let trustee = executor::block_on(db.get_one_trustee_info(&session, &msg.sender_id))
+        .map_err(|_| failure(Response::InvalidSignature))?;
+    if !msg.verify(&trustee.pubkey).map_err(|_| failure(Response::MiscError))? {
+        return Err(failure(Response::InvalidSignature));
+    }
+
+    executor::block_on(db.insert_tally(&session, &indexes, &votes))
+        .map_err(|e| {
+            match e {
+                DbError::InsertAlreadyExists => failure(Response::FailedInsertion),
+                _ => {
+                    eprintln!("unexpected error: {}", e);
+                    failure(Response::MiscError)
+                }
+            }
+        })?;
+
+    Ok(success(Response::Ok))
+}
+
+#[rocket::get("/api/<session>/tally/final")]
+fn get_tally(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_tally_inner(state, session))
+}
+fn get_tally_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.get_tally(&session))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::Votes(results)))
 }

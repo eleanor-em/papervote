@@ -4,11 +4,11 @@ use cryptid::threshold::{KeygenCommitment, DecryptShare, PubkeyProof};
 use cryptid::{Scalar, AsBase64};
 use cryptid::elgamal::{PublicKey, Ciphertext};
 use serde::{Serialize, Deserialize};
-use crate::voter::{VoterId, VoterIdent};
+use crate::voter::{VoterId, VoterIdent, Vote};
 use cryptid::shuffle::ShuffleProof;
 use cryptid::commit::CtCommitment;
 use std::collections::HashMap;
-use crate::trustee::{EcCommit, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare};
+use crate::trustee::{EcCommit, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare, AcceptedMixRow, AcceptedRow, SignedDecryptShare};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TrusteeMessage {
@@ -63,6 +63,21 @@ pub enum TrusteeMessage {
     EcPetDecrypt {
         voter_ids: Vec<VoterId>,
         shares: Vec<SignedPetDecryptShare>,
+    },
+    Accepted {
+        rows: Vec<AcceptedRow>,
+    },
+    AcceptedMix {
+        mix_index: i16,
+        rows: Vec<AcceptedMixRow>,
+        proof: ShuffleProof,
+    },
+    AcceptedDecrypt {
+        shares: Vec<SignedDecryptShare>,
+    },
+    Tally {
+        indexes: Vec<i32>,
+        votes: Vec<Vote>,
     }
 }
 
@@ -99,11 +114,15 @@ pub enum Response {
     PublicKey(SigningPubKey),
     ResultSet(Vec<SignedMessage>),
     Ciphertexts(Vec<Vec<Ciphertext>>),
+    AcceptedRows(Vec<AcceptedRow>),
+    AcceptedMixRows(Vec<AcceptedMixRow>),
     DecryptShares(Vec<Vec<SignedDecryptShareSet>>),
     Idents(Vec<VoterIdent>),
     PetCommits(HashMap<Uuid, HashMap<VoterId, (Signature, CtCommitment, CtCommitment)>>),
     PetOpenings(HashMap<Uuid, HashMap<VoterId, SignedPetOpening>>),
     PetDecryptions(HashMap<Uuid, HashMap<VoterId, SignedPetDecryptShare>>),
+    AcceptedDecryptions(HashMap<Uuid, HashMap<i32, SignedDecryptShare>>),
+    Votes(Vec<Vote>),
     Count(i64),
     Outcome(bool),
     Ok,

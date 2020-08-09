@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     open_session(&cfg, session_id.clone()).await?;
 
     // Build the candidate list
-    let candidates = get_candidates();
+    let candidate_map = get_candidates();
 
     // Create the trustees and run key generation
     let mut trustees = create_trustees(&cfg, ctx.clone(), session_id.clone()).await?;
@@ -42,19 +42,17 @@ async fn main() -> Result<()> {
 
     // Start listening for votes
     let ec = &mut trustees[0];
-    ec.receive_voter_data(candidates.clone());
+    ec.receive_voter_data(candidate_map.clone());
     time::delay_for(Duration::from_millis(200)).await;
 
     // Send votes
-    let candidates: Vec<_> = candidates.values().collect();
-
     println!("Sending vote data...");
     let mut handles = Vec::new();
 
-    const N: usize = 1000;
+    const N: usize = 100;
     for i in 0..N {
         let addr = ec.address();
-        let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidates)?;
+        let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidate_map)?;
         handles.push(tokio::spawn(run_voter(voter, cfg.api_url.clone(), addr)));
 
         // give the threads a slight break to push through
@@ -105,9 +103,27 @@ async fn main() -> Result<()> {
         println!("PET decryption #{} done", trustee.index());
     }
 
+    // Post accepted votes
     trustees[0].finish_pets(ciphertexts).await?;
 
-    time::delay_for(Duration::from_millis(1000)).await;
+    // Run last shuffle
+    for trustee in trustees.iter_mut() {
+        trustee.mix_accepted().await?;
+        println!("shuffle #{} done", trustee.index());
+    }
+
+    // Decrypt final tally
+    for trustee in trustees.iter_mut() {
+        trustee.decrypt_accepted().await?;
+        println!("decryption #{} done", trustee.index());
+    }
+
+    // Produce votes
+    let votes = trustees[0].finish(&candidate_map).await?;
+    for vote in votes {
+        println!("{}", vote.pretty());
+    }
+
     Ok(())
 }
 
@@ -193,8 +209,8 @@ async fn run_voter(mut voter: Voter, api_base_addr: String, addr: String) {
     println!("{}: voted", voter.id());
 }
 
-fn random_voter(session_id: Uuid, pubkey: PublicKey, ctx: CryptoContext, commit_ctx: PedersenCtx, candidates: &[&Candidate]) -> Result<Voter> {
-    let mut prefs: Vec<_> = candidates.iter().enumerate().map(|(_, candidate)| candidate.clone()).collect();
+fn random_voter(session_id: Uuid, pubkey: PublicKey, ctx: CryptoContext, commit_ctx: PedersenCtx, candidates: &HashMap<usize, Candidate>) -> Result<Voter> {
+    let mut prefs: Vec<_> = candidates.values().collect();
     prefs.shuffle(&mut rand::thread_rng());
 
     let id = base64::encode(Uuid::new_v4().as_bytes()).replace("/", "-");
@@ -203,6 +219,7 @@ fn random_voter(session_id: Uuid, pubkey: PublicKey, ctx: CryptoContext, commit_
     for (i, candidate) in prefs.iter().enumerate() {
         vote.set(candidate, i);
     }
+
     voter.set_vote(vote);
 
     Ok(voter)

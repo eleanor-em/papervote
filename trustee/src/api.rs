@@ -4,12 +4,13 @@ use common::sign::{SignedMessage, SigningKeypair, Signature};
 use common::voter::{VoterId, VoterIdent};
 use cryptid::elgamal::Ciphertext;
 use crate::{TrusteeError, InternalInfo};
+use itertools::izip;
 use uuid::Uuid;
 use cryptid::shuffle::ShuffleProof;
 use cryptid::threshold::{ThresholdParty, DecryptShare};
 use cryptid::commit::{CtCommitment};
 use std::collections::HashMap;
-use common::trustee::{EcCommit, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare};
+use common::trustee::{EcCommit, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare, AcceptedRow, AcceptedMixRow, SignedDecryptShare};
 
 fn sign(keypair: &SigningKeypair, msg: &TrusteeMessage) -> Result<Signature, TrusteeError> {
     let data = serde_json::to_string(&msg)?.as_bytes().to_vec();
@@ -220,6 +221,132 @@ pub async fn post_pet_decryptions(
     let form = Form::new().part("msg", Part::bytes(bytes.clone()));
 
     let response: WrappedResponse = info.client.post(&format!("{}/{}/tally/pet/decrypt", &info.api_base_addr, &info.session_id))
+        .multipart(form)
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        Err(TrusteeError::FailedResponse(response.msg))
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn post_accepted(
+    info: &InternalInfo,
+    voter_ids: Vec<VoterId>,
+    enc_votes: Vec<Ciphertext>
+) -> Result<(), TrusteeError> {
+    let mut enc_proofs = Vec::new();
+    let mut enc_ids = Vec::new();
+
+    for voter_id in voter_ids.iter() {
+        let r = info.ctx.random_scalar();
+        let enc_id = info.pubkey.encrypt(&info.ctx, &voter_id.try_as_curve_elem()
+            .ok_or(TrusteeError::Encode)?, &r);
+
+        enc_proofs.push(r);
+        enc_ids.push(enc_id);
+    }
+
+    let mut rows = Vec::new();
+    for (voter_id, enc_voter_id, enc_proof, enc_vote) in izip!(voter_ids, enc_ids, enc_proofs, enc_votes) {
+        rows.push(AcceptedRow {
+            voter_id, enc_voter_id, enc_proof, enc_vote
+        });
+    }
+
+    let inner = TrusteeMessage::Accepted { rows };
+    let signature = sign(&info.signing_keypair, &inner)?;
+
+    let msg = SignedMessage {
+        inner,
+        signature,
+        sender_id: info.id.clone()
+    };
+
+    // Construct multipart form
+    let bytes = serde_json::to_string(&msg)?;
+    let bytes = bytes.as_bytes().to_vec();
+    let form = Form::new().part("msg", Part::bytes(bytes.clone()));
+
+    let response: WrappedResponse = info.client.post(&format!("{}/{}/tally/accepted", &info.api_base_addr, &info.session_id))
+        .multipart(form)
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        Err(TrusteeError::FailedResponse(response.msg))
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn post_accepted_shuffle(
+    info: &InternalInfo,
+    enc_votes: Vec<Ciphertext>,
+    enc_voter_ids: Vec<Ciphertext>,
+    proof: ShuffleProof
+) -> Result<(), TrusteeError> {
+    let mut rows = Vec::new();
+    for (vote, id) in enc_votes.into_iter().zip(enc_voter_ids) {
+        rows.push(AcceptedMixRow {
+            vote, id
+        });
+    }
+
+    let inner = TrusteeMessage::AcceptedMix {
+        mix_index: info.index as i16,
+        rows,
+        proof,
+    };
+    let signature = sign(&info.signing_keypair, &inner)?;
+
+    let msg = SignedMessage {
+        inner,
+        signature,
+        sender_id: info.id.clone()
+    };
+
+    // Construct multipart form
+    let bytes = serde_json::to_string(&msg)?;
+    let bytes = bytes.as_bytes().to_vec();
+    let form = Form::new().part("msg", Part::bytes(bytes.clone()));
+
+    let response: WrappedResponse = info.client.post(&format!("{}/{}/tally/accepted/mix", &info.api_base_addr, &info.session_id))
+        .multipart(form)
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        Err(TrusteeError::FailedResponse(response.msg))
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn post_accepted_decryptions(
+    info: &InternalInfo,
+    shares: Vec<SignedDecryptShare>
+) -> Result<(), TrusteeError> {
+    let inner = TrusteeMessage::AcceptedDecrypt {
+        shares,
+    };
+
+    let signature = sign(&info.signing_keypair, &inner)?;
+
+    let msg = SignedMessage {
+        inner,
+        signature,
+        sender_id: info.id.clone()
+    };
+
+    // Construct multipart form
+    let bytes = serde_json::to_string(&msg)?;
+    let bytes = bytes.as_bytes().to_vec();
+    let form = Form::new().part("msg", Part::bytes(bytes.clone()));
+
+    let response: WrappedResponse = info.client.post(&format!("{}/{}/tally/accepted/decrypt", &info.api_base_addr, &info.session_id))
         .multipart(form)
         .send().await?
         .json().await?;
@@ -479,6 +606,75 @@ pub async fn get_pet_decryptions(trustee_info: &HashMap<Uuid, TrusteeInfo>,
                 result.entry(*trustee)
                     .or_insert(HashMap::new())
                     .entry(voter_id)
+                    .or_insert(share);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+pub async fn get_final_accepted_mix(
+    info: &InternalInfo,
+    trustee_count: usize
+) -> Result<HashMap<i32, AcceptedMixRow>, TrusteeError> {
+    let response: WrappedResponse = info.client.get(&format!("{}/{}/tally/accepted/mix/{}", &info.api_base_addr, &info.session_id, trustee_count - 1))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(TrusteeError::FailedResponse(response.msg));
+    }
+
+    let results = match response.msg {
+        Response::AcceptedMixRows(results) => results,
+        _ => {
+            return Err(TrusteeError::InvalidResponse);
+        }
+    };
+
+    let mut result_map = HashMap::new();
+    for (i, row) in results.into_iter().enumerate() {
+        result_map.insert(i as i32, row);
+    }
+
+    Ok(result_map)
+}
+
+pub async fn get_accepted_decryptions(trustee_info: &HashMap<Uuid, TrusteeInfo>,
+                                      info: &InternalInfo
+) -> Result<HashMap<Uuid, HashMap<i32, SignedDecryptShare>>, TrusteeError> {
+    let response: WrappedResponse = info.client.get(&format!("{}/{}/tally/accepted/decrypt",
+                                                             &info.api_base_addr,
+                                                             &info.session_id))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(TrusteeError::FailedResponse(response.msg));
+    }
+
+    let mut shares = match response.msg {
+        Response::AcceptedDecryptions(results) => results,
+        _ => {
+            return Err(TrusteeError::InvalidResponse);
+        }
+    };
+
+    let mut result = HashMap::new();
+
+    // Check signatures
+    for trustee in trustee_info.keys() {
+        let pubkey = &trustee_info[trustee].pubkey;
+        let rows = shares.remove(trustee).unwrap();
+
+        for (index, share) in rows {
+            if !share.verify(pubkey) {
+                return Err(TrusteeError::InvalidSignature);
+            } else {
+                result.entry(*trustee)
+                    .or_insert(HashMap::new())
+                    .entry(index)
                     .or_insert(share);
             }
         }

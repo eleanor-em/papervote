@@ -12,11 +12,11 @@ use common::APP_NAME;
 use common::config::PapervoteConfig;
 use common::sign::{SignedMessage, SigningPubKey, Signature};
 use common::net::{TrusteeMessage, TrusteeInfo};
-use common::voter::{VoterId, VoterIdent};
+use common::voter::{VoterId, VoterIdent, Vote};
 use cryptid::commit::{Commitment, CtCommitment};
 use cryptid::shuffle::ShuffleProof;
 use std::collections::HashMap;
-use common::trustee::{EcCommit, CtOpening, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare};
+use common::trustee::{EcCommit, CtOpening, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare, SignedDecryptShare, AcceptedMixRow, AcceptedRow};
 use cryptid::zkp::PrfEqDlogs;
 
 #[derive(Debug)]
@@ -215,6 +215,50 @@ impl DbClient {
                 vote_share      TEXT NOT NULL UNIQUE,
                 mac_share       TEXT NOT NULL UNIQUE,
                 signature       TEXT UNIQUE NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS wbb_accepted (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                voter_id        TEXT NOT NULL,
+                enc_voter_id    TEXT NOT NULL UNIQUE,
+                enc_proof       TEXT NOT NULL UNIQUE,
+                enc_vote        TEXT NOT NULL UNIQUE,
+                CONSTRAINT      unique_wbb_accepted UNIQUE(session, voter_id)
+            );
+            CREATE TABLE IF NOT EXISTS wbb_accepted_mix (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                mix_index       SMALLINT NOT NULL,
+                index           INTEGER NOT NULL,
+                enc_vote        TEXT UNIQUE NOT NULL,
+                enc_voter_id    TEXT UNIQUE NOT NULL,
+                CONSTRAINT      unique_wbb_accepted_mix UNIQUE(session, mix_index, index)
+            );
+            CREATE TABLE IF NOT EXISTS wbb_accepted_mix_proofs (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                mix_index       SMALLINT NOT NULL,
+                proof           TEXT NOT NULL,
+                signed_by       UUID NOT NULL,
+                signature       TEXT UNIQUE NOT NULL,
+                CONSTRAINT      unique_wbb_accepted_mix_proofs_session_index UNIQUE(session, mix_index),
+                CONSTRAINT      unique_wbb_accepted_mix_proofs_session_signer UNIQUE(session, signed_by)
+            );
+            CREATE TABLE IF NOT EXISTS wbb_accepted_decryptions (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                trustee         UUID NOT NULL,
+                index           INTEGER NOT NULL,
+                decrypt_share   TEXT UNIQUE NOT NULL,
+                signature       TEXT UNIQUE NOT NULL,
+                CONSTRAINT      unique_wbb_accepted_decryptions_mix UNIQUE(session, trustee, index)
+            );
+            CREATE TABLE IF NOT EXISTS wbb_tally (
+                id              SERIAL PRIMARY KEY,
+                session         UUID NOT NULL,
+                index           INTEGER NOT NULL,
+                vote            TEXT NOT NULL,
+                CONSTRAINT      unique_wbb_tally UNIQUE(session, index)
             );
         ").await?;
 
@@ -479,6 +523,90 @@ impl DbClient {
         Ok(())
     }
 
+    pub async fn insert_accepted(&self,
+                                 session: &Uuid,
+                                 rows: &[AcceptedRow]
+    ) -> Result<(), DbError> {
+        for i in 0..rows.len() {
+            if self.client.execute("
+                INSERT INTO wbb_accepted(session, voter_id, enc_voter_id, enc_proof, enc_vote)
+                VALUES ($1, $2, $3, $4, $5)
+            ", &[session, &rows[i].voter_id.to_string(), &rows[i].enc_voter_id.to_string(),
+                &rows[i].enc_proof.as_base64(), &rows[i].enc_vote.to_string()
+            ]).await? == 0 {
+                return Err(DbError::InsertAlreadyExists);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn insert_accepted_mix(&self,
+                                    session: &Uuid,
+                                    mix_index: i16,
+                                    rows: &[AcceptedMixRow],
+                                    proof: &ShuffleProof,
+                                    signed_by: &Uuid,
+                                    signature: &Signature,
+    ) -> Result<(), DbError> {
+        for i in 0..rows.len() {
+            if self.client.execute("
+                INSERT INTO wbb_accepted_mix(session, mix_index, index, enc_vote, enc_voter_id)
+                VALUES ($1, $2, $3, $4, $5)
+            ", &[session, &mix_index, &(i as i32), &rows[i].vote.to_string(),
+                &rows[i].id.to_string()]).await? == 0 {
+                return Err(DbError::InsertAlreadyExists);
+            }
+        }
+        let result = self.client.execute("
+            INSERT INTO wbb_accepted_mix_proofs(session, mix_index, proof, signed_by, signature)
+            VALUES ($1, $2, $3, $4, $5);
+        ", &[session, &mix_index, &proof.to_string(), signed_by, &signature.as_base64()]).await?;
+
+        if result > 0 {
+            Ok(())
+        } else {
+            Err(DbError::InsertAlreadyExists)
+        }
+    }
+
+    pub async fn insert_accepted_decrypt(&self,
+                                         session: &Uuid,
+                                         trustee: &Uuid,
+                                         shares: &[SignedDecryptShare]
+    ) -> Result<(), DbError> {
+        for i in 0..shares.len() {
+            if self.client.execute("
+                INSERT INTO wbb_accepted_decryptions(session, trustee, index, decrypt_share, signature)
+                VALUES ($1, $2, $3, $4, $5);
+            ", &[session, trustee, &shares[i].index,
+                &serde_json::to_string(&shares[i].decrypt_share).unwrap(),
+                &shares[i].signature.as_base64()
+            ]).await? == 0 {
+                return Err(DbError::InsertAlreadyExists);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn insert_tally(&self,
+                              session: &Uuid,
+                              indexes: &[i32],
+                              votes: &[Vote]
+    ) -> Result<(), DbError> {
+        for i in 0..indexes.len() {
+            if self.client.execute("
+                INSERT INTO wbb_tally(session, index, vote)
+                VALUES ($1, $2, $3);
+            ", &[session, &indexes[i], &serde_json::to_string(&votes[i]).unwrap()]).await? == 0 {
+                return Err(DbError::InsertAlreadyExists);
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn count_trustees(&self, session: &Uuid) -> Result<usize, DbError> {
         let result = self.client.query_one("
             SELECT COUNT(1) FROM trustees WHERE session=$1;
@@ -681,7 +809,7 @@ impl DbClient {
         Ok(result)
     }
 
-    pub async fn get_decrypt(&self, session: &Uuid) -> Result<Vec<Vec<SignedDecryptShareSet>>, DbError> {
+    pub async fn get_vote_decrypt(&self, session: &Uuid) -> Result<Vec<Vec<SignedDecryptShareSet>>, DbError> {
         let rows = self.client.query("
             SELECT trustee, signature, share, index
             FROM wbb_votes_decrypt
@@ -933,6 +1061,109 @@ impl DbClient {
         Ok(share_map)
     }
 
+    pub async fn get_accepted(&self, session: &Uuid) -> Result<Vec<AcceptedRow>, DbError> {
+        let rows = self.client.query("
+            SELECT voter_id, enc_voter_id, enc_proof, enc_vote
+            FROM wbb_accepted
+            WHERE session=$1
+            ORDER BY id;
+        ", &[session]).await?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let voter_id: String = row.get("voter_id");
+            let voter_id = VoterId::from(voter_id);
+
+            let enc_voter_id: String = row.get("enc_voter_id");
+            let enc_voter_id = Ciphertext::try_from(enc_voter_id)
+                .map_err(|_| DbError::SchemaFailure("enc_voter_id"))?;
+
+            let enc_proof: String = row.get("enc_proof");
+            let enc_proof = Scalar::try_from_base64(&enc_proof)
+                .map_err(|_| DbError::SchemaFailure("enc_proof"))?;
+
+            let enc_vote: String = row.get("enc_vote");
+            let enc_vote = Ciphertext::try_from(enc_vote)
+                .map_err(|_| DbError::SchemaFailure("enc_vote"))?;
+
+            result.push(AcceptedRow { voter_id, enc_voter_id, enc_proof, enc_vote });
+        }
+
+        Ok(result)
+    }
+
+    pub async fn get_accepted_mix(&self, session: &Uuid, mix_index: i16) -> Result<Vec<AcceptedMixRow>, DbError> {
+        let rows = self.client.query("
+            SELECT enc_vote, enc_voter_id
+            FROM wbb_accepted_mix
+            WHERE session=$1 AND mix_index=$2
+            ORDER BY index;
+        ", &[session, &mix_index]).await?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let vote: String = row.get(0);
+            let vote = Ciphertext::try_from(vote).map_err(|_| DbError::SchemaFailure("vote"))?;
+            let id: String = row.get(1);
+            let id = Ciphertext::try_from(id).map_err(|_| DbError::SchemaFailure("voter id"))?;
+            result.push(AcceptedMixRow { vote, id });
+        }
+
+        Ok(result)
+    }
+
+    pub async fn get_all_accepted_decryptions(&self, session: &Uuid) -> Result<HashMap<Uuid, HashMap<i32, SignedDecryptShare>>, DbError> {
+        let rows = self.client.query("
+            SELECT trustee, index, decrypt_share, signature
+            FROM wbb_accepted_decryptions
+            WHERE session=$1;
+        ", &[session]).await?;
+
+        let mut share_map = HashMap::new();
+
+        for row in rows {
+            let trustee_id: Uuid = row.get("trustee");
+
+            let index: i32 = row.get("index");
+
+            let decrypt_share: String = row.get("decrypt_share");
+            let decrypt_share: DecryptShare = serde_json::from_str(decrypt_share.as_str())
+                .map_err(|_| DbError::SchemaFailure("decrypt_share"))?;
+
+            let signature: String = row.get("signature");
+            let signature = Signature::try_from_base64(&signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
+
+            share_map.entry(trustee_id)
+                .or_insert(HashMap::new())
+                .entry(index)
+                .or_insert(SignedDecryptShare {
+                    trustee_id, index, decrypt_share, signature
+                });
+        }
+
+        Ok(share_map)
+    }
+
+    pub async fn get_tally(&self, session: &Uuid) -> Result<Vec<Vote>, DbError> {
+        let rows = self.client.query("
+            SELECT vote
+            FROM wbb_tally
+            WHERE session=$1
+            ORDER BY index;
+        ", &[session]).await?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let vote: String = row.get("vote");
+            let vote: Vote = serde_json::from_str(&vote)
+                .map_err(|_| DbError::SchemaFailure("vote"))?;
+            result.push(vote);
+        }
+
+        Ok(result)
+    }
+
     pub async fn count_pet_commits(&self, session: &Uuid) -> Result<i64, DbError> {
         let result = self.client.query_one("
             SELECT COUNT(*) FROM wbb_pet_commits WHERE session=$1;
@@ -955,7 +1186,8 @@ impl DbClient {
                 trustees, sessions, parameters, parameter_signatures, keygen_commitments,
                 wbb_idents, wbb_commits, wbb_votes, wbb_votes_mix, wbb_votes_mix_proofs,
                 wbb_votes_decrypt, wbb_failed_votes, wbb_pet_commits, wbb_pet_openings,
-                wbb_pet_decryptions,
+                wbb_pet_decryptions, wbb_accepted, wbb_accepted_mix, wbb_accepted_mix_proofs,
+                wbb_accepted_decryptions, wbb_tally
             CASCADE;
         ", &[]).await?;
 

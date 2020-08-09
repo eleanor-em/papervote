@@ -28,7 +28,7 @@ use cryptid::shuffle::Shuffle;
 use rayon::prelude::*;
 use std::convert::TryFrom;
 use crate::gen::GeneratingTrustee;
-use common::trustee::{CtOpening, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare};
+use common::trustee::{CtOpening, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare, SignedDecryptShare};
 
 mod api;
 mod gen;
@@ -40,6 +40,7 @@ pub enum TrusteeError {
     Io(std::io::Error),
     Serde(serde_json::Error),
     Net(reqwest::Error),
+    Encode,
     Decode,
     FailedResponse(Response),
     InvalidSignature,
@@ -413,15 +414,17 @@ impl Trustee {
             return Ok(());
         }
 
-        match Vote::from_string(&ballot.p1_vote, &candidates) {
+        let vote = ballot.p1_vote;
+        let decoded_vote = match Vote::from_string(&vote, &candidates) {
             None => {
                 eprintln!("#{}: invalid vote encoding", info.index);
                 return Ok(());
             }
-            Some(_vote) => {
+            Some(vote) => {
                 // println!("#{}: received vote:\n{}", info.index, vote.pretty());
+                vote
             }
-        }
+        };
 
         // Re-randomise encryptions
         let r = info.ctx.random_scalar();
@@ -436,12 +439,8 @@ impl Trustee {
         let enc_r_b = info.pubkey.rerand(&info.ctx, &ballot.p1_enc_r_b, &r);
 
         // Encrypt the vote with exponential encryption
-        let vote = ballot.p1_vote;
-        let vote_value = u128::from_str_radix(&vote, 10)
-            .map_err(|_| TrusteeError::Decode)?;
-        let vote_value: Scalar = vote_value.into();
         let prf_enc_vote = info.ctx.random_scalar();
-        let enc_vote = info.pubkey.encrypt(&info.ctx, &info.ctx.g_to(&vote_value), &prf_enc_vote);
+        let enc_vote = info.pubkey.encrypt(&info.ctx, &info.ctx.g_to(&decoded_vote.encode()), &prf_enc_vote);
 
         // Construct message
         let inner = TrusteeMessage::EcVote {
@@ -951,6 +950,112 @@ impl Trustee {
             .map(|row| row[0].clone())
             .collect();
 
+        api::post_accepted(&self.info, validated_voter_ids, enc_votes).await?;
+
         Ok(())
+    }
+
+    pub async fn mix_accepted(&mut self) -> Result<(), TrusteeError> {
+        let response: WrappedResponse = if self.info.index == 1 {
+            // if index 1, get the raw votes
+            self.info.client.get(&format!("{}/{}/tally/accepted", &self.info.api_base_addr, &self.info.session_id))
+                .send().await?
+                .json().await?
+        } else {
+            // otherwise, get the output of the previous mix
+            self.info.client.get(&format!("{}/{}/tally/accepted/mix/{}", &self.info.api_base_addr, &self.info.session_id, self.info.index - 1))
+                .send().await?
+                .json().await?
+        };
+
+        if !response.status {
+            return Err(TrusteeError::FailedResponse(response.msg));
+        }
+
+        // Allow two different structures for the two different cases
+        let votes: Vec<_> = if self.info.index == 1 {
+            match response.msg {
+                Response::AcceptedRows(rows) => {
+                    rows.into_iter().map(|row| vec![row.enc_vote, row.enc_voter_id]).collect()
+                },
+                _ => {
+                    return Err(TrusteeError::InvalidResponse);
+                }
+            }
+        } else {
+            match response.msg {
+                Response::AcceptedMixRows(rows) => {
+                    rows.into_iter().map(|row| vec![row.vote, row.id]).collect()
+                },
+                _ => {
+                    return Err(TrusteeError::InvalidResponse);
+                }
+            }
+        };
+
+        let mut ctx = self.info.ctx.clone();
+        let (commit_ctx, generators) = PedersenCtx::with_generators(self.info.session_id.as_bytes(), votes.len());
+        let shuffle = Shuffle::new(ctx.clone(), votes, &self.info.pubkey)?;
+        let proof = shuffle.gen_proof(&mut ctx, &commit_ctx, &generators, &self.info.pubkey)?;
+
+        let outputs = shuffle.outputs().to_vec();
+        let mut enc_votes = Vec::new();
+        let mut enc_voter_ids = Vec::new();
+
+        for mut cts in outputs.into_iter() {
+            enc_voter_ids.push(cts.remove(1));
+            enc_votes.push(cts.remove(0));
+        }
+
+        // send shuffle
+        api::post_accepted_shuffle(&self.info, enc_votes, enc_voter_ids, proof).await?;
+        Ok(())
+    }
+
+    pub async fn decrypt_accepted(&mut self) -> Result<(), TrusteeError> {
+        let final_accepted = api::get_final_accepted_mix(&self.info, self.party.trustee_count()).await?;
+
+        let mut shares = Vec::new();
+        shares.par_extend(final_accepted.into_par_iter().map(|(i, row)| {
+            let share = self.party.decrypt_share(&row.vote);
+            SignedDecryptShare::new(self.info.id.clone(), &self.info.signing_keypair, i, share)
+        }));
+
+        api::post_accepted_decryptions(&self.info, shares).await?;
+
+        Ok(())
+    }
+
+    pub async fn finish(&self, candidates: &HashMap<usize, Candidate>) -> Result<Vec<Vote>, TrusteeError> {
+        // Download ciphertexts
+        let final_accepted = api::get_final_accepted_mix(&self.info, self.party.trustee_count()).await?;
+
+        // Download decryption shares
+        let decrypt_shares = api::get_accepted_decryptions(&self.trustee_info, &self.info).await?;
+
+        let mut decryptions = HashMap::new();
+
+        for (trustee, shares) in decrypt_shares {
+            for (index, share) in shares {
+                decryptions.entry(index)
+                    .or_insert(Decryption::new(self.party.min_trustees(), &self.info.ctx, &final_accepted[&index].vote))
+                    .add_share(self.trustee_info[&trustee].index, self.trustee_info[&trustee].pubkey_proof.as_ref().unwrap(), &share.decrypt_share);
+            }
+        }
+
+        let mut votes = Vec::new();
+        for i in 0..decryptions.len() {
+            let result = decryptions[&(i as i32)].finish()
+                .map_err(|_| TrusteeError::InvalidState)?;
+            let value = result.into();
+
+            if let Some(vote) = Vote::decode(value, candidates) {
+                votes.push(vote);
+            } else {
+                eprintln!("Failed to decode vote #{}", i);
+            }
+        }
+
+        Ok(votes)
     }
 }

@@ -22,6 +22,46 @@ pub struct CtOpening {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct AcceptedRow {
+    pub voter_id: VoterId,
+    pub enc_voter_id: Ciphertext,
+    pub enc_proof: Scalar,
+    pub enc_vote: Ciphertext,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct AcceptedMixRow {
+    pub vote: Ciphertext,
+    pub id: Ciphertext,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct SignedDecryptShare {
+    pub trustee_id: Uuid,
+    pub signature: Signature,
+    pub index: i32,
+    pub decrypt_share: DecryptShare,
+}
+
+impl SignedDecryptShare {
+    pub fn new(trustee_id: Uuid, keypair: &SigningKeypair, index: i32, share: DecryptShare) -> Self {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(serde_json::to_string(&share).unwrap().as_bytes());
+        bytes.extend_from_slice(&index.to_be_bytes());
+
+        let signature = keypair.sign(&bytes);
+        Self { trustee_id, signature, index, decrypt_share: share }
+    }
+    pub fn verify(&self, pubkey: &SigningPubKey) -> bool {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(serde_json::to_string(&self.decrypt_share).unwrap().as_bytes());
+        bytes.extend_from_slice(&self.index.to_be_bytes());
+
+        pubkey.verify(&bytes, &self.signature)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct SignedDecryptShareSet {
     pub trustee_id: Uuid,
     pub signature: Signature,
