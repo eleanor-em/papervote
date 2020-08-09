@@ -1,4 +1,4 @@
-#![feature(async_closure)]
+#![feature(async_closure, assoc_char_funcs)]
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -29,6 +29,7 @@ use rayon::prelude::*;
 use std::convert::TryFrom;
 use crate::gen::GeneratingTrustee;
 use common::trustee::{CtOpening, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare, SignedDecryptShare};
+use itertools::Itertools;
 
 mod api;
 mod gen;
@@ -245,6 +246,7 @@ impl Trustee {
     }
 
     pub async fn close_votes(&self, expected: usize) -> Result<(), TrusteeError> {
+        // Retry a few times in case votes are late
         let mut count = 0;
         loop {
             let current = self.received_votes.lock().unwrap().len();
@@ -1043,18 +1045,26 @@ impl Trustee {
             }
         }
 
-        let mut votes = Vec::new();
-        for i in 0..decryptions.len() {
-            let result = decryptions[&(i as i32)].finish()
-                .map_err(|_| TrusteeError::InvalidState)?;
-            let value = result.into();
+        let votes = decryptions.into_par_iter().map(|(_, decryption)| {
+            let result = decryption.finish().ok()?;
 
-            if let Some(vote) = Vote::decode(value, candidates) {
-                votes.push(vote);
-            } else {
-                eprintln!("Failed to decode vote #{}", i);
-            }
-        }
+            // Brute-force g to the power of ...
+            let value = (0..candidates.len()).permutations(candidates.len())
+                    .map(|perm| {
+                        let string_rep: String = perm.into_iter()
+                            .map(|c| char::from_digit(c as u32, 36).unwrap())
+                            .join("");
+                        Vote::from_string(&string_rep, candidates)
+                            .map(|vote| vote.encode())
+                            .filter(|scalar| self.info.ctx.g_to(scalar) == result)
+                    })
+                    .filter(|opt| opt.is_some())
+                    .map(|opt| opt.unwrap())
+                    .next()?;
+            Vote::decode(value, candidates)
+        }).filter(|opt| opt.is_some())
+            .map(|opt| opt.unwrap())
+            .collect();
 
         Ok(votes)
     }

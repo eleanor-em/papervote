@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     println!("Sending vote data...");
     let mut handles = Vec::new();
 
-    const N: usize = 100;
+    const N: usize = 1000;
     for i in 0..N {
         let addr = ec.address();
         let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidate_map)?;
@@ -120,9 +120,7 @@ async fn main() -> Result<()> {
 
     // Produce votes
     let votes = trustees[0].finish(&candidate_map).await?;
-    for vote in votes {
-        println!("{}", vote.pretty());
-    }
+    println!("{} votes counted.", votes.len());
 
     Ok(())
 }
