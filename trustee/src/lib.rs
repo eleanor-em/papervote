@@ -280,7 +280,7 @@ impl Trustee {
         }
     }
 
-    pub fn receive_voter_data(&mut self, candidates: Arc<HashMap<usize, Candidate>>) {
+    pub fn receive_voter_data(&mut self, candidates: Arc<HashMap<u64, Candidate>>) {
         let (future, handle) = futures::future::abortable(Self::receive_voter_data_task(
             self.info.clone(),
             self.failed_voter_ids.clone(),
@@ -294,7 +294,7 @@ impl Trustee {
     async fn receive_voter_data_task(info: InternalInfo,
                                      failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
                                      received_votes: Arc<Mutex<Vec<SignedMessage>>>,
-                                     candidates: Arc<HashMap<usize, Candidate>>) -> Result<(), TrusteeError> {
+                                     candidates: Arc<HashMap<u64, Candidate>>) -> Result<(), TrusteeError> {
         let mut listener = TcpListener::bind(&info.address).await?;
 
         while let Some(stream) = listener.next().await {
@@ -310,7 +310,7 @@ impl Trustee {
                                       info: InternalInfo,
                                       failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
                                       received_votes: Arc<Mutex<Vec<SignedMessage>>>,
-                                      candidates: Arc<HashMap<usize, Candidate>>) -> Result<(), TrusteeError> {
+                                      candidates: Arc<HashMap<u64, Candidate>>) -> Result<(), TrusteeError> {
         // Read entire stream
         let mut buffer = String::new();
         stream.read_to_string(&mut buffer).await?;
@@ -383,7 +383,7 @@ impl Trustee {
     async fn handle_ballot(info: InternalInfo,
                            failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
                            received_votes: Arc<Mutex<Vec<SignedMessage>>>,
-                           candidates: Arc<HashMap<usize, Candidate>>,
+                           candidates: Arc<HashMap<u64, Candidate>>,
                            ballot: Ballot) -> Result<(), TrusteeError> {
         let mut failed = false;
 
@@ -1028,7 +1028,7 @@ impl Trustee {
         Ok(())
     }
 
-    pub async fn finish(&self, candidates: &HashMap<usize, Candidate>) -> Result<Vec<Vote>, TrusteeError> {
+    pub async fn finish(&self, candidates: &HashMap<u64, Candidate>) -> Result<(), TrusteeError> {
         // Download ciphertexts
         let final_accepted = api::get_final_accepted_mix(&self.info, self.party.trustee_count()).await?;
 
@@ -1066,6 +1066,8 @@ impl Trustee {
             .map(|opt| opt.unwrap())
             .collect();
 
-        Ok(votes)
+        api::post_tally(&self.info, votes).await?;
+
+        Ok(())
     }
 }

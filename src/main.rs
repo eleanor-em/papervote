@@ -12,8 +12,8 @@ use uuid::Uuid;
 use common::APP_NAME;
 use common::config::PapervoteConfig;
 use common::voter::{Candidate, Vote};
-use common::net::{WrappedResponse, NewSessionRequest};
-use trustee::Trustee;
+use common::net::{WrappedResponse, NewSessionRequest, Response};
+use trustee::{Trustee, TrusteeError};
 use voter::Voter;
 use wbb::api::Api;
 use cryptid::commit::PedersenCtx;
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     println!("Sending vote data...");
     let mut handles = Vec::new();
 
-    const N: usize = 1000;
+    const N: usize = 100;
     for i in 0..N {
         let addr = ec.address();
         let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidate_map)?;
@@ -119,7 +119,10 @@ async fn main() -> Result<()> {
     }
 
     // Produce votes
-    let votes = trustees[0].finish(&candidate_map).await?;
+    trustees[0].finish(&candidate_map).await?;
+    println!("Tally uploaded.");
+
+    let votes = get_tally(&cfg, &session_id).await?;
     println!("{} votes counted.", votes.len());
 
     Ok(())
@@ -151,7 +154,7 @@ async fn open_session(cfg: &PapervoteConfig, session_id: Uuid) -> Result<()> {
         trustee_count: cfg.trustee_count,
     };
 
-    let res: WrappedResponse = client.post(&format!("{}{}/new", cfg.api_url, session_id))
+    let res: WrappedResponse = client.post(&format!("{}/{}/new", cfg.api_url, session_id))
         .json(&req)
         .send().await?
         .json().await?;
@@ -163,7 +166,7 @@ async fn open_session(cfg: &PapervoteConfig, session_id: Uuid) -> Result<()> {
     Ok(())
 }
 
-fn get_candidates() -> Arc<HashMap<usize, Candidate>> {
+fn get_candidates() -> Arc<HashMap<u64, Candidate>> {
     let alice = Candidate::new("Alice", 0);
     let bob = Candidate::new("Bob", 1);
     let carol = Candidate::new("Carol", 2);
@@ -207,7 +210,7 @@ async fn run_voter(mut voter: Voter, api_base_addr: String, addr: String) {
     println!("{}: voted", voter.id());
 }
 
-fn random_voter(session_id: Uuid, pubkey: PublicKey, ctx: CryptoContext, commit_ctx: PedersenCtx, candidates: &HashMap<usize, Candidate>) -> Result<Voter> {
+fn random_voter(session_id: Uuid, pubkey: PublicKey, ctx: CryptoContext, commit_ctx: PedersenCtx, candidates: &HashMap<u64, Candidate>) -> Result<Voter> {
     let mut prefs: Vec<_> = candidates.values().collect();
     prefs.shuffle(&mut rand::thread_rng());
 
@@ -215,10 +218,30 @@ fn random_voter(session_id: Uuid, pubkey: PublicKey, ctx: CryptoContext, commit_
     let mut voter = Voter::new(session_id.clone(), pubkey, ctx.clone(), commit_ctx, id)?;
     let mut vote = Vote::new();
     for (i, candidate) in prefs.iter().enumerate() {
-        vote.set(candidate, i);
+        vote.set(candidate, i as u64);
     }
 
     voter.set_vote(vote);
 
     Ok(voter)
+}
+
+pub async fn get_tally(
+    cfg: &PapervoteConfig,
+    session_id: &Uuid
+) -> Result<Vec<Vote>, TrusteeError> {
+    let client = reqwest::Client::new();
+
+    let response: WrappedResponse = client.get(&format!("{}/{}/tally/final", cfg.api_url, session_id))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(TrusteeError::FailedResponse(response.msg));
+    }
+
+    match response.msg {
+        Response::Votes(results) => Ok(results),
+        _ => Err(TrusteeError::InvalidResponse)
+    }
 }

@@ -592,14 +592,13 @@ impl DbClient {
 
     pub async fn insert_tally(&self,
                               session: &Uuid,
-                              indexes: &[i32],
                               votes: &[Vote]
     ) -> Result<(), DbError> {
-        for i in 0..indexes.len() {
+        for i in 0..votes.len() {
             if self.client.execute("
                 INSERT INTO wbb_tally(session, index, vote)
                 VALUES ($1, $2, $3);
-            ", &[session, &indexes[i], &serde_json::to_string(&votes[i]).unwrap()]).await? == 0 {
+            ", &[session, &(i as i32), &serde_json::to_string(&votes[i]).unwrap()]).await? == 0 {
                 return Err(DbError::InsertAlreadyExists);
             }
         }

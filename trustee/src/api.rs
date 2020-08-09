@@ -1,7 +1,7 @@
 use reqwest::multipart::{Form, Part};
 use common::net::{TrusteeMessage, WrappedResponse, Response, TrusteeInfo};
 use common::sign::{SignedMessage, SigningKeypair, Signature};
-use common::voter::{VoterId, VoterIdent};
+use common::voter::{VoterId, VoterIdent, Vote};
 use cryptid::elgamal::Ciphertext;
 use crate::{TrusteeError, InternalInfo};
 use itertools::izip;
@@ -347,6 +347,37 @@ pub async fn post_accepted_decryptions(
     let form = Form::new().part("msg", Part::bytes(bytes.clone()));
 
     let response: WrappedResponse = info.client.post(&format!("{}/{}/tally/accepted/decrypt", &info.api_base_addr, &info.session_id))
+        .multipart(form)
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        Err(TrusteeError::FailedResponse(response.msg))
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn post_tally(
+    info: &InternalInfo,
+    votes: Vec<Vote>
+) -> Result<(), TrusteeError> {
+    let inner = TrusteeMessage::Tally(votes);
+
+    let signature = sign(&info.signing_keypair, &inner)?;
+
+    let msg = SignedMessage {
+        inner,
+        signature,
+        sender_id: info.id.clone()
+    };
+
+    // Construct multipart form
+    let bytes = serde_json::to_string(&msg)?;
+    let bytes = bytes.as_bytes().to_vec();
+    let form = Form::new().part("msg", Part::bytes(bytes.clone()));
+
+    let response: WrappedResponse = info.client.post(&format!("{}/{}/tally/final", &info.api_base_addr, &info.session_id))
         .multipart(form)
         .send().await?
         .json().await?;

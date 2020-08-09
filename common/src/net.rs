@@ -75,10 +75,7 @@ pub enum TrusteeMessage {
     AcceptedDecrypt {
         shares: Vec<SignedDecryptShare>,
     },
-    Tally {
-        indexes: Vec<i32>,
-        votes: Vec<Vote>,
-    }
+    Tally(Vec<Vote>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

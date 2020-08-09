@@ -986,8 +986,8 @@ fn post_tally_inner(state: State<'_, Api>, content_type: &ContentType,  session:
         .as_str())
         .map_err(|_| failure(Response::ParseError))?;
 
-    let (indexes, votes) = match &msg.inner {
-        TrusteeMessage::Tally { indexes, votes } => Ok((indexes, votes)),
+    let votes = match &msg.inner {
+        TrusteeMessage::Tally(votes) => Ok(votes),
         _ => Err(failure(Response::InvalidRequest))
     }?;
 
@@ -1000,7 +1000,7 @@ fn post_tally_inner(state: State<'_, Api>, content_type: &ContentType,  session:
         return Err(failure(Response::InvalidSignature));
     }
 
-    executor::block_on(db.insert_tally(&session, &indexes, &votes))
+    executor::block_on(db.insert_tally(&session, &votes))
         .map_err(|e| {
             match e {
                 DbError::InsertAlreadyExists => failure(Response::FailedInsertion),

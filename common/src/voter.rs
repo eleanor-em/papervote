@@ -13,11 +13,11 @@ use std::fmt;
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct Candidate {
     name: String,
-    id: usize,
+    id: u64,
 }
 
 impl Candidate {
-    pub fn new(name: &str, id: usize) -> Self {
+    pub fn new(name: &str, id: u64) -> Self {
         Self {
             name: name.to_string(), id
         }
@@ -27,14 +27,15 @@ impl Candidate {
         &self.name
     }
 
-    pub fn id(&self) -> usize {
+    pub fn id(&self) -> u64 {
         self.id
     }
 }
 
+// TODO: Custom ser/de because objects can't be keys (sigh).
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Vote {
-    preferences: HashMap<Candidate, usize>,
+    preferences: HashMap<Candidate, u64>,
 }
 
 // Only allow up to 36 candidate IDs for now
@@ -44,15 +45,15 @@ impl Vote {
         Self { preferences: HashMap::new() }
     }
 
-    pub fn set(&mut self, candidate: &Candidate, preference: usize) {
+    pub fn set(&mut self, candidate: &Candidate, preference: u64) {
         self.preferences.insert(candidate.clone(), preference);
     }
 
-    pub fn from_string(encoded: &str, candidates: &HashMap<usize, Candidate>) -> Option<Self> {
+    pub fn from_string(encoded: &str, candidates: &HashMap<u64, Candidate>) -> Option<Self> {
         let mut preferences = HashMap::new();
         for (i, c) in encoded.chars().enumerate() {
             if let Some(pref) = char::to_digit(c, 36) {
-                preferences.insert(candidates[&i].clone(), pref as usize);
+                preferences.insert(candidates[&(i as u64)].clone(), pref as u64);
             } else {
                 println!("failed at char #{}: {}", i, c);
                 return None;
@@ -75,7 +76,7 @@ impl Vote {
         Scalar::from(array)
     }
 
-    pub fn decode(value: Scalar, candidates: &HashMap<usize, Candidate>) -> Option<Self> {
+    pub fn decode(value: Scalar, candidates: &HashMap<u64, Candidate>) -> Option<Self> {
         let bytes = value.to_bytes().to_vec()
             .into_iter()
             .filter(|c| c.is_ascii_digit())
@@ -238,7 +239,7 @@ mod tests {
 
             let mut vote = Vote::new();
             for (i, candidate) in prefs.iter().enumerate() {
-                vote.set(candidate, i);
+                vote.set(candidate, i as u64);
             }
 
             let scalar = vote.encode();
