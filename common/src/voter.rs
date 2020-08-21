@@ -11,10 +11,57 @@ use serde::export::Formatter;
 use std::fmt;
 use itertools::Itertools;
 
+pub fn write_default_candidates(path: &str) -> std::io::Result<()> {
+    let alice = Candidate::new("Alice", 0);
+    let bob = Candidate::new("Bob", 1);
+    let carol = Candidate::new("Carol", 2);
+    let dave = Candidate::new("Dave", 3);
+    let edward = Candidate::new("Edward", 4);
+    let fringilla = Candidate::new("Fringilla", 5);
+    let gertrude = Candidate::new("Gertrude", 6);
+    let mut candidates = HashMap::new();
+
+    candidates.insert(alice.id(), alice.clone());
+    candidates.insert(bob.id(), bob.clone());
+    candidates.insert(carol.id(), carol.clone());
+    candidates.insert(dave.id(), dave.clone());
+    candidates.insert(edward.id(), edward.clone());
+    candidates.insert(fringilla.id(), fringilla.clone());
+    candidates.insert(gertrude.id(), gertrude.clone());
+
+    candidates_to_file(&candidates, path)?;
+
+    Ok(())
+}
+
+pub fn candidates_to_file(candidates: &HashMap<u64, Candidate>, path: &str) -> std::io::Result<()> {
+    let mut keys = candidates.keys().collect_vec();
+    keys.sort();
+    let candidates = keys.into_iter()
+        .map(|i| candidates[i].clone())
+        .collect_vec();
+    std::fs::write(path, serde_json::to_string(&candidates).unwrap())?;
+    Ok(())
+}
+
+pub fn candidates_from_file(path: &str) -> Result<HashMap<u64, Candidate>, CandidateParseError> {
+    let contents = std::fs::read_to_string(path)?;
+    let candidates: Vec<Candidate> = serde_json::from_str(&contents)?;
+
+    let mut result = HashMap::new();
+    for candidate in candidates {
+        result.insert(candidate.id, candidate);
+    }
+
+    Ok(result)
+}
+
 #[derive(Debug)]
 pub enum CandidateParseError {
     Count,
     Id,
+    Io(std::io::Error),
+    Decode(serde_json::Error),
 }
 
 impl Display for CandidateParseError {
@@ -24,6 +71,18 @@ impl Display for CandidateParseError {
 }
 
 impl std::error::Error for CandidateParseError {}
+
+impl From<std::io::Error> for CandidateParseError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<serde_json::Error> for CandidateParseError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Decode(err)
+    }
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Candidate {
@@ -73,6 +132,8 @@ impl TryFrom<&str> for Candidate {
     }
 }
 
+// This bit sucks, but integers can't be keys in serde_json so we have to implement the
+// ser/de traits ourselves
 impl serde::Serialize for Candidate {
     fn serialize<S>(&self, serializer: S) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>
         where
@@ -106,7 +167,6 @@ impl<'de> serde::Deserialize<'de> for Candidate {
     }
 }
 
-// TODO: Custom ser/de because objects can't be keys (sigh).
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Vote {
     preferences: HashMap<Candidate, u64>,
@@ -117,6 +177,10 @@ pub struct Vote {
 impl Vote {
     pub fn new() -> Self {
         Self { preferences: HashMap::new() }
+    }
+
+    pub fn contains(&self, preference: u64) -> bool {
+        self.preferences.values().any(|val| *val == preference)
     }
 
     pub fn set(&mut self, candidate: &Candidate, preference: u64) {

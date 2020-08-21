@@ -1,4 +1,5 @@
 use serde::{Serialize, Deserialize};
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
 pub struct PapervoteConfig {
@@ -9,6 +10,9 @@ pub struct PapervoteConfig {
     pub db_pass: String,
     pub db_name: String,
     pub api_url: String,
+    pub candidate_file: String,
+    pub session_id: Uuid,
+    pub debug_mode: bool,
 }
 
 impl Default for PapervoteConfig {
@@ -21,6 +25,9 @@ impl Default for PapervoteConfig {
             db_pass: "password".to_string(),
             db_name: "papervote".to_string(),
             api_url: "http://localhost:8000/api".to_string(),
+            candidate_file: "candidates.json".to_string(),
+            session_id: Uuid::new_v4(),
+            debug_mode: true,
         }
     }
 }

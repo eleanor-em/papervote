@@ -73,7 +73,9 @@ impl DbClient {
         });
 
         let client = Self { client };
-        client.reset().await?;
+        if cfg.debug_mode {
+            client.reset().await?;
+        }
         client.init().await?;
 
         Ok(client)
@@ -1190,7 +1192,7 @@ impl DbClient {
                 wbb_accepted_decryptions, wbb_tally
             CASCADE;
         ", &[]).await?;
-
+        println!("WBB: Dropped existing tables.");
         Ok(())
     }
 }

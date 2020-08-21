@@ -9,7 +9,6 @@ use cryptid::elgamal::{CryptoContext, PublicKey, Ciphertext, CurveElem};
 use cryptid::threshold::{Threshold, ThresholdParty, Decryption, PubkeyProof};
 use cryptid::AsBase64;
 use reqwest::Client;
-use tokio::time;
 use tokio::time::Duration;
 use uuid::Uuid;
 
@@ -32,7 +31,24 @@ use common::trustee::{CtOpening, SignedDecryptShareSet, SignedPetOpening, Signed
 use itertools::Itertools;
 
 mod api;
+pub mod follower;
 mod gen;
+pub mod leader;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ControlMessage {
+    Begin,
+    OpenVotes,
+    CloseVotes,
+    FirstShuffle,
+    FirstDecrypt,
+    PetCommit,
+    PetOpenCommits,
+    PetDecrypt,
+    LastShuffle,
+    LastDecrypt,
+    Ok,
+}
 
 #[derive(Debug)]
 pub enum TrusteeError {
@@ -245,19 +261,7 @@ impl Trustee {
         self.info.address.clone()
     }
 
-    pub async fn close_votes(&self, expected: usize) -> Result<(), TrusteeError> {
-        // Retry a few times in case votes are late
-        let mut count = 0;
-        loop {
-            let current = self.received_votes.lock().unwrap().len();
-            if count >= 5 || current >= expected {
-                break;
-            }
-            println!("waiting for votes... ({}/{})", current, expected);
-            count += 1;
-            time::delay_for(Duration::from_millis(1000)).await;
-        }
-
+    pub async fn close_votes(&self) -> Result<(), TrusteeError> {
         if let Some(handle) = &self.abort_handle {
             // Abort tasks
             handle.abort();

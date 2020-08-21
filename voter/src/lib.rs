@@ -137,7 +137,7 @@ impl Voter {
         }
     }
 
-    pub async fn post_vote(&mut self, address: &str) -> Result<(), VoterError> {
+    pub fn get_ballot(&mut self) -> Result<Ballot, VoterError> {
         let (a, prf_a) = self.encrypt(&self.a.clone())?;
         let (b, prf_b) = self.encrypt(&self.b.clone())?;
         let (r_a, prf_r_a) = self.encrypt(&self.r_a.clone())?;
@@ -146,7 +146,7 @@ impl Voter {
 
         let g = self.ctx.generator();
 
-        let ballot = Ballot {
+        Ok(Ballot {
             p1_vote: self.vote.as_ref().map(|v| v.to_string()).ok_or(VoterError::VoteMissing)?,
             p1_enc_a: a.clone(),
             p1_enc_b: b.clone(),
@@ -159,8 +159,11 @@ impl Voter {
             p2_id: self.voter_id.clone(),
             p2_enc_id: id,
             p2_prf_enc: prf_id,
-        };
+        })
+    }
 
+    pub async fn post_vote(&mut self, address: &str) -> Result<(), VoterError> {
+        let ballot = self.get_ballot()?;
         let msg = VoterMessage::Ballot(ballot);
         let mut stream = TcpStream::connect(address).await?;
         stream.write_all(serde_json::to_string(&msg)

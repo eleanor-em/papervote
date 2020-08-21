@@ -11,33 +11,27 @@ use uuid::Uuid;
 
 use common::APP_NAME;
 use common::config::PapervoteConfig;
-use common::voter::{Candidate, Vote};
+use common::voter::{Candidate, Vote, candidates_from_file};
 use common::net::{WrappedResponse, NewSessionRequest, Response};
 use trustee::{Trustee, TrusteeError};
 use voter::Voter;
-use wbb::api::Api;
 use cryptid::commit::PedersenCtx;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Setup
     let cfg: PapervoteConfig = confy::load(APP_NAME)?;
-    let session_id = Uuid::new_v4();
     let ctx = CryptoContext::new()?;
-    let commit_ctx = PedersenCtx::new(session_id.as_bytes());
-
-    // Start the web server
-    let api = Api::new().await?;
-    std::thread::spawn(move || api.start());
+    let commit_ctx = PedersenCtx::new(cfg.session_id.as_bytes());
 
     // Create a new election session
-    open_session(&cfg, session_id.clone()).await?;
+    open_session(&cfg, cfg.session_id.clone()).await?;
 
     // Build the candidate list
-    let candidate_map = get_candidates();
+    let candidate_map = Arc::new(candidates_from_file(&cfg.candidate_file)?);
 
     // Create the trustees and run key generation
-    let mut trustees = create_trustees(&cfg, ctx.clone(), session_id.clone()).await?;
+    let mut trustees = create_trustees(&cfg, ctx.clone(), cfg.session_id.clone()).await?;
     let pubkey = trustees[0].pubkey();
 
     // Start listening for votes
@@ -52,7 +46,7 @@ async fn main() -> Result<()> {
     const N: usize = 100;
     for i in 0..N {
         let addr = ec.address();
-        let voter = random_voter(session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidate_map)?;
+        let voter = random_voter(cfg.session_id.clone(), pubkey.clone(), ctx.clone(), commit_ctx.clone(), &candidate_map)?;
         handles.push(tokio::spawn(run_voter(voter, cfg.api_url.clone(), addr)));
 
         // give the threads a slight break to push through
@@ -65,7 +59,8 @@ async fn main() -> Result<()> {
 
     // Close vote listener
     println!("Votes closing soon...");
-    ec.close_votes(N).await?;
+    time::delay_for(Duration::from_millis(1000)).await;
+    ec.close_votes().await?;
 
     // Run first shuffle
     for trustee in trustees.iter_mut() {
@@ -122,7 +117,7 @@ async fn main() -> Result<()> {
     trustees[0].finish(&candidate_map).await?;
     println!("Tally uploaded.");
 
-    let votes = get_tally(&cfg, &session_id).await?;
+    let votes = get_tally(&cfg, &cfg.session_id).await?;
     println!("{} votes counted.", votes.len());
 
     Ok(())
@@ -164,25 +159,6 @@ async fn open_session(cfg: &PapervoteConfig, session_id: Uuid) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn get_candidates() -> Arc<HashMap<u64, Candidate>> {
-    let alice = Candidate::new("Alice", 0);
-    let bob = Candidate::new("Bob", 1);
-    let carol = Candidate::new("Carol", 2);
-    let dave = Candidate::new("Dave", 3);
-    let edward = Candidate::new("Edward", 4);
-    let fringilla = Candidate::new("Fringilla", 5);
-    let gertrude = Candidate::new("Gertrude", 6);
-    let mut candidates = HashMap::new();
-    candidates.insert(alice.id(), alice.clone());
-    candidates.insert(bob.id(), bob.clone());
-    candidates.insert(carol.id(), carol.clone());
-    candidates.insert(dave.id(), dave.clone());
-    candidates.insert(edward.id(), edward.clone());
-    candidates.insert(fringilla.id(), fringilla.clone());
-    candidates.insert(gertrude.id(), gertrude.clone());
-    Arc::new(candidates)
 }
 
 async fn run_voter(mut voter: Voter, api_base_addr: String, addr: String) {

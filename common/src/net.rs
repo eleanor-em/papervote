@@ -106,7 +106,7 @@ pub struct WrappedResponse {
     pub msg: Response,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
     PublicKey(SigningPubKey),
     ResultSet(Vec<SignedMessage>),
