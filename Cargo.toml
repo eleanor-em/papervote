@@ -5,20 +5,10 @@ authors = ["Eleanor McMurtry <elmcmurtry1@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0+"
 
-[dependencies]
-common = { path = "common" }
-trustee = { path = "trustee" }
-voter = { path = "voter" }
-wbb = { path = "wbb" }
-tokio = { version = "0.2", features = ["full"] }
-rand = "0"
-cryptid = { git = "https://github.com/eleanor-em/cryptid" }
-uuid = { version = "0", features = ["serde", "v4"] }
-eyre = "0"
-confy = "0"
-futures = "0"
-reqwest = { version = "0", features = ["json"] }
-base64 = "0"
-
 [workspace]
 members = ["common", "trustee", "voter", "wbb"]
+
+[dependencies]
+trustee = { path = "trustee" }
+eyre = "0"
+tokio = { version = "0.2", features = ["full"] }

@@ -1438,19 +1438,9 @@ dependencies = [
 name = "papervote"
 version = "0.1.0"
 dependencies = [
- "base64 0.12.3",
- "common",
- "confy",
- "cryptid",
  "eyre",
- "futures",
- "rand 0.7.3",
- "reqwest",
  "tokio",
  "trustee",
- "uuid",
- "voter",
- "wbb",
 ]
 
 [[package]]

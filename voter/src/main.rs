@@ -94,7 +94,6 @@ async fn main() -> Result<()> {
     println!("---");
     println!("Your vote (Paper 1):");
     println!("{}", vote_str);
-    println!("---");
     println!("Your encrypted parameters (Paper 1):");
     println!("\ta:   {}", ballot.p1_enc_a.to_string());
     println!("\tb:   {}", ballot.p1_enc_b.to_string());
