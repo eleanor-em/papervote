@@ -2,15 +2,15 @@ use eyre::Result;
 use common::config::PapervoteConfig;
 use tokio::io::{AsyncWriteExt, BufReader, AsyncBufReadExt};
 use tokio::net::TcpStream;
-use common::net::{NewSessionRequest, WrappedResponse};
-use crate::{Trustee, ControlMessage};
+use common::net::{NewSessionRequest, WrappedResponse, Response};
+use crate::{Trustee, ControlMessage, TrusteeError};
 use uuid::Uuid;
-use cryptid::commit::PedersenCtx;
 use cryptid::elgamal::CryptoContext;
 use common::APP_NAME;
 use tokio::time::Duration;
 use tokio::time;
 use std::sync::Arc;
+use common::voter::Vote;
 
 fn with_newline(msg: ControlMessage) -> Vec<u8> {
     format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes().to_vec()
@@ -20,7 +20,6 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>) -> Result<()> {
     let cfg: PapervoteConfig = confy::load(APP_NAME)?;
     let candidates = common::voter::candidates_from_file(&cfg.candidate_file)?;
     let ctx = CryptoContext::new()?;
-    let commit_ctx = PedersenCtx::new(cfg.session_id.as_bytes());
 
     open_session(&cfg, cfg.session_id.clone()).await?;
 
@@ -44,7 +43,8 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>) -> Result<()> {
     wait_for_ok(&mut streams).await?;
 
     println!("Opening votes.");
-    trustee.receive_voter_data(Arc::new(candidates));
+    let candidates = Arc::new(candidates);
+    trustee.receive_voter_data(candidates.clone());
 
     // For now, wait for input to close votes
     print!("Press Enter to close votes> ");
@@ -53,11 +53,92 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>) -> Result<()> {
 
     trustee.close_votes().await?;
 
-    for stream in streams.iter_mut() {
-        stream.write_all(&with_newline(ControlMessage::FirstShuffle)).await?;
-    }
+    // First shuffle
     println!("first shuffle");
     trustee.mix_votes().await?;
+    // Shuffle in order
+    for stream in streams.iter_mut() {
+        stream.write_all(&with_newline(ControlMessage::FirstShuffle)).await?;
+
+        let mut reader = BufReader::new(stream);
+        let mut buffer = String::new();
+        reader.read_line(&mut buffer).await?;
+
+        match serde_json::from_str(&buffer) {
+            Ok(ControlMessage::Ok) => { /* ok */ },
+            Ok(msg) => { eprintln!("unexpected message from follower: {:?}", msg) },
+            Err(e) => { eprintln!("error receiving follower message: {}", e) }
+        }
+    }
+
+    // First decrypt
+    for stream in streams.iter_mut() {
+        stream.write_all(&with_newline(ControlMessage::FirstDecrypt)).await?;
+    }
+    println!("first decrypt");
+    trustee.decrypt_first_mix().await?;
+    wait_for_ok(&mut streams).await?;
+
+    // PET commits
+    for stream in streams.iter_mut() {
+        stream.write_all(&with_newline(ControlMessage::PetCommit)).await?;
+    }
+    println!("PET commits");
+    let pet_instances = trustee.validate_votes().await?;
+    let pet_data = trustee.do_pet_commits(pet_instances).await?;
+    wait_for_ok(&mut streams).await?;
+
+    // PET openings
+    for stream in streams.iter_mut() {
+        stream.write_all(&with_newline(ControlMessage::PetOpenCommits)).await?;
+    }
+    println!("PET openings");
+    let data = trustee.do_pet_openings(pet_data).await?;
+    wait_for_ok(&mut streams).await?;
+
+    // PET decryptions
+    for stream in streams.iter_mut() {
+        stream.write_all(&with_newline(ControlMessage::PetDecrypt)).await?;
+    }
+    println!("PET decryptions");
+    let ciphertexts = trustee.do_pet_decryptions(data).await?;
+    wait_for_ok(&mut streams).await?;
+
+    // Post accepted votes
+    trustee.finish_pets(ciphertexts).await?;
+
+    // Last shuffle
+    println!("last shuffle");
+    trustee.mix_accepted().await?;
+    // Shuffle in order
+    for stream in streams.iter_mut() {
+        stream.write_all(&with_newline(ControlMessage::LastShuffle)).await?;
+
+        let mut reader = BufReader::new(stream);
+        let mut buffer = String::new();
+        reader.read_line(&mut buffer).await?;
+
+        match serde_json::from_str(&buffer) {
+            Ok(ControlMessage::Ok) => { /* ok */ },
+            Ok(msg) => { eprintln!("unexpected message from follower: {:?}", msg) },
+            Err(e) => { eprintln!("error receiving follower message: {}", e) }
+        }
+    }
+
+    // Last decryptions
+    for stream in streams.iter_mut() {
+        stream.write_all(&with_newline(ControlMessage::LastDecrypt)).await?;
+    }
+    println!("last decryptions");
+    trustee.decrypt_accepted().await?;
+    wait_for_ok(&mut streams).await?;
+
+    // Produce accepted votes
+    trustee.finish(&candidates).await?;
+    let votes = get_tally(&cfg).await?;
+    for vote in votes {
+        println!("{}", vote.pretty());
+    }
 
     Ok(())
 }
@@ -95,4 +176,23 @@ async fn wait_for_ok(streams: &mut [TcpStream]) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn get_tally(
+    cfg: &PapervoteConfig
+) -> Result<Vec<Vote>, TrusteeError> {
+    let client = reqwest::Client::new();
+
+    let response: WrappedResponse = client.get(&format!("{}/{}/tally/final", cfg.api_url, cfg.session_id))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(TrusteeError::FailedResponse(response.msg));
+    }
+
+    match response.msg {
+        Response::Votes(results) => Ok(results),
+        _ => Err(TrusteeError::InvalidResponse)
+    }
 }
