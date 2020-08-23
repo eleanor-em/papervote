@@ -11,9 +11,8 @@ k-out-of-n threshold ElGamal encryption is done with [Cryptid](https://github.co
     1. You may need to install `libssl-dev` and `pkg-config` depending on the operating system.
 
 ## Running
-**As a voter:** Run `target/release/voter`. The values listed as `Paper 1` should be printed onto one piece of paper,
-and the values listed as `Paper 2` should be printed onto another piece of paper. Both of these should be placed into
-the same envelope and mailed to the address.
+**As a voter:** Run `target/release/voter`. It will generate two files: `paper1.pdf` and `paper2.pdf`. Print both.
+Fold `paper1.pdf` so it hides the data, and fold `paper2.pdf` so it shows the data. Place both in an envelope and mail it.
 
 **As the WBB:** Run `target/release/wbb`. To change the port it listens on, use `export ROCKET_PORT=xxxx`.
 

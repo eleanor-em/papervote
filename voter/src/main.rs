@@ -12,7 +12,10 @@ use cryptid::AsBase64;
 use common::voter::Vote;
 use tokio::time;
 use tokio::time::Duration;
-use std::io::Write;
+use std::io::{Write, BufWriter};
+use qrcode::QrCode;
+use printpdf::{PdfDocument, Mm, Image};
+use std::fs::File;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -94,20 +97,66 @@ async fn main() -> Result<()> {
     println!("---");
     println!("Your vote (Paper 1):");
     println!("{}", vote_str);
-    println!("Your encrypted parameters (Paper 1):");
-    println!("\ta:   {}", ballot.p1_enc_a.to_string());
-    println!("\tb:   {}", ballot.p1_enc_b.to_string());
-    println!("\tr_a: {}", ballot.p1_enc_r_a.to_string());
-    println!("\tr_b: {}", ballot.p1_enc_r_b.to_string());
-    println!("\tproof a:   {}", ballot.p1_prf_a.to_string());
-    println!("\tproof b:   {}", ballot.p1_prf_b.to_string());
-    println!("\tproof r_a: {}", ballot.p1_prf_r_a.to_string());
-    println!("\tproof r_b: {}", ballot.p1_prf_r_b.to_string());
-    println!("---");
-    println!("Your identification (Paper 2):");
-    println!("\tID: {}", ballot.p2_id);
-    println!("\t    {}", ballot.p2_enc_id.to_string());
-    println!("\t    {}", ballot.p2_prf_enc.as_base64());
+    let mut data = Vec::new();
+    data.extend(ballot.p1_enc_a.to_string().as_bytes());
+    data.push(b'-');
+    data.extend(ballot.p1_enc_b.to_string().as_bytes());
+    data.push(b'-');
+    data.extend(ballot.p1_enc_r_a.to_string().as_bytes());
+    data.push(b'-');
+    data.extend(ballot.p1_enc_r_b.to_string().as_bytes());
+    data.push(b'-');
+    data.extend(ballot.p1_prf_a.to_string().as_bytes());
+    data.push(b'-');
+    data.extend(ballot.p1_prf_b.to_string().as_bytes());
+    data.push(b'-');
+    data.extend(ballot.p1_prf_r_a.to_string().as_bytes());
+    data.push(b'-');
+    data.extend(ballot.p1_prf_r_b.to_string().as_bytes());
+    let image = QrCode::new(&data)?.render::<image::Luma<u8>>().build();
+    image.save("paper1-img.bmp")?;
+
+    println!("Your identification (save this for verification later) (Paper 2):");
+    println!("\tID:        {}", ballot.p2_id);
+
+    let mut data = Vec::new();
+    data.extend(ballot.p2_enc_id.to_string().as_bytes());
+    data.push(b'-');
+    data.extend(ballot.p2_prf_enc.as_base64().as_bytes());
+
+    let image = QrCode::new(&data)?.render::<image::Luma<u8>>().build();
+    image.save("paper2-img.bmp")?;
+
+    // Create PDFs
+    let (doc, page1, layer1) = PdfDocument::new("Vote Paper 1", Mm(210.0), Mm(297.0), "Layer 1");
+    let current_layer = doc.get_page(page1).get_layer(layer1);
+
+    let font = doc.add_builtin_font(printpdf::BuiltinFont::Courier)?;
+    let vote_str = vote_str.replace("\n", " ");
+    current_layer.use_text(&format!("Paper 1: {}", vote_str), 14, Mm(25.0), Mm(270.0), &font);
+
+    let mut image_file = File::open("paper1-img.bmp")?;
+    let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;
+    image.add_to_layer(current_layer.clone(), Some(Mm(25.0)), Some(Mm(150.0)), None, None, None, None);
+
+    doc.save(&mut BufWriter::new(File::create("paper1.pdf")?))?;
+
+    let (doc, page1, layer1) = PdfDocument::new("Vote Paper 2", Mm(210.0), Mm(297.0), "Layer 1");
+    let current_layer = doc.get_page(page1).get_layer(layer1);
+
+    let font = doc.add_builtin_font(printpdf::BuiltinFont::Courier)?;
+    current_layer.use_text(&format!("Paper 2: {}", ballot.p2_id.to_string()), 14, Mm(25.0), Mm(270.0), &font);
+
+    let mut image_file = File::open("paper2-img.bmp")?;
+    let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;
+    image.add_to_layer(current_layer.clone(), Some(Mm(25.0)), Some(Mm(220.0)), None, None, None, None);
+
+    doc.save(&mut BufWriter::new(File::create("paper2.pdf")?))?;
+
+    std::fs::remove_file("paper1-img.bmp")?;
+    std::fs::remove_file("paper2-img.bmp")?;
+
+    println!("Files to print saved to `paper1.pdf` and `paper2.pdf`.");
 
     Ok(())
 }

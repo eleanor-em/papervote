@@ -48,7 +48,6 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>) -> Result<()> {
     trustee.receive_voter_data(candidates.clone());
 
     // For now, wait for input to close votes
-    print!("Press Enter to close votes> ");
     let mut buffer = String::new();
     std::io::stdin().read_line(&mut buffer)?;
 
