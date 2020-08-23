@@ -84,10 +84,10 @@ async fn main() -> Result<()> {
     }
 
     // for debugging
-    while let Err(_) = voter.post_vote(&trustees[0].address).await{
-        println!("{}: retrying vote", voter.id());
-        time::delay_for(Duration::from_millis(DELAY)).await;
-    }
+    // while let Err(_) = voter.post_vote(&trustees[0].address).await{
+    //     println!("{}: retrying vote", voter.id());
+    //     time::delay_for(Duration::from_millis(DELAY)).await;
+    // }
 
     let ballot = voter.get_ballot()?;
 
