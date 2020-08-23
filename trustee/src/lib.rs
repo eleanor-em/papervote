@@ -199,6 +199,9 @@ impl Trustee {
         trustee.receive_shares().await?;
         let party = trustee.generator.finish()?;
 
+        println!("Private key share: {}", party.private_share().as_base64());
+        println!("Pubkey proof share: {}", party.pubkey_proof().as_base64());
+
         // 4. Sign public key
         let msg = trustee.sign(TrusteeMessage::KeygenSign {
             pubkey: party.pubkey(),
@@ -333,6 +336,8 @@ impl Trustee {
                             prf_know_vote,
                         ).await {
                             eprintln!("#{}: error handling commit: {}", info.index, e);
+                        } else {
+                            println!("#{}: received EC commit", info.index);
                         }
                     })());
                 }
@@ -346,6 +351,8 @@ impl Trustee {
                             ballot,
                         ).await {
                             eprintln!("#{}: error handling ballot: {}", info.index, e);
+                        } else {
+                            println!("#{}: received ballot", info.index);
                         }
                     })());
                 }

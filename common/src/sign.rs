@@ -39,6 +39,7 @@ impl SigningKeypair {
         let mut seed = [0; 32];
         rng.fill_bytes(&mut seed);
         // Below call cannot fail
+        println!("signing keypair seed: {}", base64::encode(&seed));
         Self(Ed25519KeyPair::from_seed_unchecked(&seed).unwrap())
     }
 
