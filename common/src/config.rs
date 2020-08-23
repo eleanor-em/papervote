@@ -25,10 +25,11 @@ impl Default for PapervoteConfig {
             db_user: "postgres".to_string(),
             db_pass: "password".to_string(),
             db_name: "papervote".to_string(),
-            api_url: "115.146.93.101:8001/api".to_string(),
+            api_url: "http://115.146.93.101:8001/api".to_string(),
             trustee_advertised_url: "115.146.93.101".to_string(),
             candidate_file: "candidates.json".to_string(),
-            session_id: Uuid::new_v4(),
+            // session_id: Uuid::new_v4(),
+            session_id: Uuid::parse_str("86ee2bfe-4677-4398-9e61-ad9087fc3117").unwrap(),
             debug_mode: true,
         }
     }
