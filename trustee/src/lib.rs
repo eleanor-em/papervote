@@ -152,12 +152,13 @@ pub struct InternalInfo {
 
 impl Trustee {
     pub async fn new(api_base_addr: String,
+                     advertised_addr: String,
                      session_id: Uuid,
                      ctx: CryptoContext,
                      index: usize,
                      min_trustees: usize,
                      trustee_count: usize) -> Result<Trustee, TrusteeError> {
-        let mut trustee = GeneratingTrustee::new(api_base_addr.clone(), session_id.clone(), &ctx, index, min_trustees, trustee_count)?;
+        let mut trustee = GeneratingTrustee::new(api_base_addr.clone(), advertised_addr, session_id.clone(), &ctx, index, min_trustees, trustee_count)?;
 
         let client = reqwest::Client::builder()
             .gzip(true)

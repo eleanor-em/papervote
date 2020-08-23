@@ -39,7 +39,8 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>) -> Result<()> {
     for stream in streams.iter_mut() {
         stream.write_all(&with_newline(ControlMessage::Begin)).await?;
     }
-    let mut trustee = Trustee::new(cfg.api_url.clone(), cfg.session_id, ctx, index, cfg.min_trustees, cfg.trustee_count).await?;
+    let mut trustee = Trustee::new(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
+                                   cfg.session_id, ctx, index, cfg.min_trustees, cfg.trustee_count).await?;
     wait_for_ok(&mut streams).await?;
 
     println!("Opening votes.");

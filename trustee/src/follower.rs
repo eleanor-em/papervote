@@ -27,7 +27,8 @@ pub async fn run_follower(index: usize, port: u16) -> Result<()> {
 
     let mut trustee = if let Ok(ControlMessage::Begin) = serde_json::from_str(&buffer) {
         println!("creating trustee");
-        Trustee::new(cfg.api_url.clone(), cfg.session_id, ctx, index, cfg.min_trustees, cfg.trustee_count).await?
+        Trustee::new(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
+                     cfg.session_id, ctx, index, cfg.min_trustees, cfg.trustee_count).await?
     } else {
         panic!("unexpected message from leader");
     };

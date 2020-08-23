@@ -26,6 +26,7 @@ pub struct GeneratingTrustee {
 impl GeneratingTrustee {
     pub fn new(
         api_base_addr: String,
+        advertised_addr: String,
         session_id: Uuid,
         ctx: &CryptoContext,
         index: usize,
@@ -46,7 +47,7 @@ impl GeneratingTrustee {
             pubkey: signing_keypair.public_key().into(),
             pubkey_proof: None,
             index,
-            address: format!("localhost:{}", port),
+            address: format!("{}:{}", advertised_addr, port),
         };
         trustee_info.insert(id, my_info);
 
