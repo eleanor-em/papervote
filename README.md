@@ -5,6 +5,14 @@ To build and run, there is a makefile `make` (or run `cargo build --release --al
 
 k-out-of-n threshold ElGamal encryption is done with [Cryptid](https://github.com/eleanor-em/cryptid) using Pedersen secret sharing and Curve25519 ([Ristretto](https://ristretto.group/) subgroup).
 
+## Run via Docker
+If you'd like to use Docker, there is a Dockerfile provided.
+1. Run `docker build -t papervote .` to build the image.
+1. Run `docker run -it --name voter papervote` to run the image, and make your selections.
+1. Run the following commands to copy the printable PDF output:
+    1. `docker cp voter:/usr/src/app/paper1.pdf .`
+    1. `docker cp voter:/usr/src/app/paper2.pdf .`
+
 ## Building
 1. Install `rustup` with the nightly toolchain using the installation script here: [download link](https://rustup.rs/).
  **Don't use a package manager to do this!**
