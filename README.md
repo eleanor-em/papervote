@@ -6,7 +6,9 @@ To build and run, there is a makefile `make` (or run `cargo build --release --al
 k-out-of-n threshold ElGamal encryption is done with [Cryptid](https://github.com/eleanor-em/cryptid) using Pedersen secret sharing and Curve25519 ([Ristretto](https://ristretto.group/) subgroup).
 
 ## Building
-1. Install `rustup` with the nightly configuration in custom installation settings ([Rust toolkit download link](https://rustup.rs/)).
+1. Install `rustup` with the nightly toolchain using the installation script here: [download link](https://rustup.rs/).
+ **Don't use a package manager to do this!**
+    1. You'll need to select the custom installation settings to set it to use nightly. Otherwise, you can run `rustup install nightly` to switch to the right toolchain. 
 1. Run `make`.
     1. You may need to install `libssl-dev` and `pkg-config` depending on the operating system.
 
