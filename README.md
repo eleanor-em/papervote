@@ -8,7 +8,7 @@ k-out-of-n threshold ElGamal encryption is done with [Cryptid](https://github.co
 ## Building
 1. Install `rustup` with the nightly toolchain using the installation script here: [download link](https://rustup.rs/).
  **Don't use a package manager to do this!**
-    1. You'll need to select the custom installation settings to set it to use nightly. Otherwise, you can run `rustup install nightly` to switch to the right toolchain. 
+    1. You'll need to select the custom installation settings to set it to use nightly. Otherwise, you can run `rustup install nightly` to install the right toolchain, then `rustup default nightly` to set it as your default. 
 1. Run `make`.
     1. You may need to install `libssl-dev` and `pkg-config` depending on the operating system.
 
