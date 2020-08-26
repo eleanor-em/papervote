@@ -1,4 +1,4 @@
-use cryptid::zkp::PrfKnowDlog;
+use cryptid::zkp::PrfKnowPlaintext;
 use cryptid::elgamal::{Ciphertext, CurveElem};
 use cryptid::{Scalar, CryptoError};
 use std::convert::{TryInto, TryFrom};
@@ -310,10 +310,10 @@ pub struct Ballot {
     pub p1_enc_b: Ciphertext,
     pub p1_enc_r_a: Ciphertext,
     pub p1_enc_r_b: Ciphertext,
-    pub p1_prf_a: PrfKnowDlog,
-    pub p1_prf_b: PrfKnowDlog,
-    pub p1_prf_r_a: PrfKnowDlog,
-    pub p1_prf_r_b: PrfKnowDlog,
+    pub p1_prf_a: PrfKnowPlaintext,
+    pub p1_prf_b: PrfKnowPlaintext,
+    pub p1_prf_r_a: PrfKnowPlaintext,
+    pub p1_prf_r_b: PrfKnowPlaintext,
     pub p2_id: VoterId,
     pub p2_enc_id: Ciphertext,
     pub p2_prf_enc: Scalar,
@@ -333,8 +333,8 @@ pub enum VoterMessage {
         voter_id: VoterId,
         enc_mac: Ciphertext,
         enc_vote: Ciphertext,
-        prf_know_mac: PrfKnowDlog,
-        prf_know_vote: PrfKnowDlog,
+        prf_know_mac: PrfKnowPlaintext,
+        prf_know_vote: PrfKnowPlaintext,
     },
     Ballot(Ballot),
 }

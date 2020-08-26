@@ -17,7 +17,7 @@ use common::sign::{SignedMessage, SigningKeypair};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
 use tokio::io::AsyncReadExt;
-use cryptid::zkp::{PrfKnowDlog, PrfEqDlogs};
+use cryptid::zkp::{PrfKnowPlaintext, PrfEqDlogs};
 use std::sync::{Arc, Mutex};
 use futures::future::AbortHandle;
 use common::net::{TrusteeMessage, TrusteeInfo, Response, WrappedResponse};
@@ -369,8 +369,8 @@ impl Trustee {
                               voter_id: VoterId,
                               enc_mac: Ciphertext,
                               enc_vote: Ciphertext,
-                              prf_know_mac: PrfKnowDlog,
-                              prf_know_vote: PrfKnowDlog) -> Result<(), TrusteeError> {
+                              prf_know_mac: PrfKnowPlaintext,
+                              prf_know_vote: PrfKnowPlaintext) -> Result<(), TrusteeError> {
         // Check the proofs
         if !prf_know_mac.verify() {
             eprintln!("#{}: failed to verify MAC proof-of-knowledge", info.index);

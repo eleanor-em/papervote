@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use cryptid::{Scalar, CryptoError};
 use cryptid::elgamal::{CryptoContext, Ciphertext, PublicKey, CurveElem};
-use cryptid::zkp::PrfKnowDlog;
+use cryptid::zkp::PrfKnowPlaintext;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time;
@@ -144,18 +144,16 @@ impl Voter {
         let (r_b, prf_r_b) = self.encrypt(&self.r_b.clone())?;
         let (id, prf_id) = self.encrypt(&self.voter_id.try_as_curve_elem().ok_or(VoterError::Decode)?)?;
 
-        let g = self.ctx.generator();
-
         Ok(Ballot {
             p1_vote: self.vote.as_ref().map(|v| v.to_string()).ok_or(VoterError::VoteMissing)?,
             p1_enc_a: a.clone(),
             p1_enc_b: b.clone(),
             p1_enc_r_a: r_a.clone(),
             p1_enc_r_b: r_b.clone(),
-            p1_prf_a: PrfKnowDlog::new(&mut self.ctx, &g, &prf_a, &a.c1),
-            p1_prf_b: PrfKnowDlog::new(&mut self.ctx, &g, &prf_b, &b.c1),
-            p1_prf_r_a: PrfKnowDlog::new(&mut self.ctx, &g, &prf_r_a, &r_a.c1),
-            p1_prf_r_b: PrfKnowDlog::new(&mut self.ctx, &g, &prf_r_b, &r_b.c1),
+            p1_prf_a: PrfKnowPlaintext::new(&self.ctx, a, prf_a),
+            p1_prf_b: PrfKnowPlaintext::new(&self.ctx, b, prf_b),
+            p1_prf_r_a: PrfKnowPlaintext::new(&self.ctx, r_a, prf_r_a),
+            p1_prf_r_b: PrfKnowPlaintext::new(&self.ctx, r_b, prf_r_b),
             p2_id: self.voter_id.clone(),
             p2_enc_id: id,
             p2_prf_enc: prf_id,
@@ -208,12 +206,10 @@ impl Voter {
         let enc_mac = self.pubkey.encrypt(&self.ctx, mac, &r1);
         let enc_vote = self.pubkey.encrypt(&self.ctx, vote, &r2);
 
-        let g = self.ctx.generator();
-
-        let prf_know_mac = PrfKnowDlog::new(&mut self.ctx, &g, &r1, &enc_mac.c1);
+        let prf_know_mac = PrfKnowPlaintext::new(&self.ctx, enc_mac.clone(), r1.clone());
         assert!(prf_know_mac.verify());
 
-        let prf_know_vote = PrfKnowDlog::new(&mut self.ctx, &g, &r1, &enc_mac.c1);
+        let prf_know_vote = PrfKnowPlaintext::new(&self.ctx, enc_vote.clone(), r2.clone());
         assert!(prf_know_vote.verify());
 
         Ok(VoterMessage::EcCommit {
