@@ -6,7 +6,7 @@ edition = "2018"
 license = "GPL-3.0+"
 
 [workspace]
-members = ["common", "trustee", "voter", "wbb"]
+members = ["common", "trustee", "verify", "voter", "wbb"]
 
 [dependencies]
 trustee = { path = "trustee" }
