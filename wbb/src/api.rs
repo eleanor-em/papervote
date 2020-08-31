@@ -50,6 +50,7 @@ impl Api {
                 post_tally,
                 get_ec_votes,
                 get_ec_mix_votes,
+                get_vote_mix_all,
                 get_ec_vote_decrypt,
                 get_idents,
                 get_ec_commits,
@@ -59,6 +60,7 @@ impl Api {
                 get_pet_decryptions,
                 get_accepted,
                 get_accepted_mix,
+                get_accepted_mix_all,
                 get_accepted_decryptions,
                 get_tally,
             ])
@@ -440,6 +442,22 @@ fn get_ec_mix_votes_inner(state: State<'_, Api>, session: String, mix_index: i16
             failure(Response::MiscError)
         })?;
     Ok(success(Response::Ciphertexts(results)))
+}
+
+
+#[rocket::get("/api/<session>/tally/vote_mix")]
+fn get_vote_mix_all(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_vote_mix_all_inner(state, session))
+}
+fn get_vote_mix_all_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.get_vote_mix_proofs(&session))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::VoteMixProofs(results)))
 }
 
 #[rocket::post("/api/<session>/tally/mixed", data = "<data>")]
@@ -892,6 +910,21 @@ fn get_accepted_mix_inner(state: State<'_, Api>, session: String, mix_index: i16
             failure(Response::MiscError)
         })?;
     Ok(success(Response::AcceptedMixRows(results)))
+}
+
+#[rocket::get("/api/<session>/tally/accepted/mix")]
+fn get_accepted_mix_all(state: State<'_, Api>, session: String) -> Json<WrappedResponse> {
+    respond(get_accepted_mix_all_inner(state, session))
+}
+fn get_accepted_mix_all_inner(state: State<'_, Api>, session: String) -> EitherResponse {
+    let session = Uuid::from_str(&session)
+        .map_err(|_| failure(Response::InvalidSession))?;
+    let results = executor::block_on(state.db.get_accepted_mix_proofs(&session))
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            failure(Response::MiscError)
+        })?;
+    Ok(success(Response::AcceptedMixProofs(results)))
 }
 
 #[rocket::post("/api/<session>/tally/accepted/decrypt", data = "<data>")]

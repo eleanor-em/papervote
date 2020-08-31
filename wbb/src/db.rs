@@ -11,7 +11,7 @@ use uuid::Uuid;
 use common::APP_NAME;
 use common::config::PapervoteConfig;
 use common::sign::{SignedMessage, SigningPubKey, Signature};
-use common::net::{TrusteeMessage, TrusteeInfo};
+use common::net::{TrusteeMessage, TrusteeInfo, VoteMixProof, AcceptedMixProof};
 use common::voter::{VoterId, VoterIdent, Vote};
 use cryptid::commit::{Commitment, CtCommitment};
 use cryptid::shuffle::ShuffleProof;
@@ -811,6 +811,80 @@ impl DbClient {
         Ok(result)
     }
 
+    pub async fn get_vote_mix_proofs(&self, session: &Uuid) -> Result<Vec<VoteMixProof>, DbError> {
+        let mix_indexes = self.client.query("
+            SELECT DISTINCT mix_index
+            FROM wbb_votes_mix
+            WHERE session=$1;
+        ", &[session]).await?;
+
+        let mut proofs = Vec::new();
+        for row in mix_indexes {
+            let mix_index: i16 = row.get(0);
+            let enc_rows = self.client.query("
+                SELECT enc_vote, enc_voter_id, enc_param_a, enc_param_b, enc_param_r_a, enc_param_r_b
+                FROM wbb_votes_mix
+                WHERE session=$1 AND mix_index=$2
+                ORDER BY index;
+            ", &[session, &mix_index]).await?;
+            let mut enc_votes = Vec::new();
+            let mut enc_voter_ids = Vec::new();
+            let mut enc_as = Vec::new();
+            let mut enc_bs = Vec::new();
+            let mut enc_r_as = Vec::new();
+            let mut enc_r_bs = Vec::new();
+            for row in enc_rows {
+                // Deserialise
+                let s: String = row.get(0);
+                let vote = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("vote"))?;
+                let s: String = row.get(1);
+                let id = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("voter id"))?;
+                let s: String = row.get(2);
+                let a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("a"))?;
+                let s: String = row.get(3);
+                let b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("b"))?;
+                let s: String = row.get(4);
+                let r_a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_a"))?;
+                let s: String = row.get(5);
+                let r_b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_b"))?;
+                // Push data
+                enc_votes.push(vote);
+                enc_voter_ids.push(id);
+                enc_as.push(a);
+                enc_bs.push(b);
+                enc_r_as.push(r_a);
+                enc_r_bs.push(r_b);
+            }
+
+            let row = self.client.query_one("
+                SELECT proof, signed_by, signature
+                FROM wbb_votes_mix_proofs
+                WHERE session=$1 AND mix_index=$2;
+            ", &[session, &mix_index]).await?;
+            let proof: String = row.get("proof");
+            let proof: ShuffleProof = serde_json::from_str(&proof).map_err(|_| DbError::SchemaFailure("proof"))?;
+            let signed_by: Uuid = row.get("signed_by");
+            let signature: String = row.get("signature");
+            let signature = Signature::try_from_base64(&signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
+
+            proofs.push(VoteMixProof {
+                index: mix_index,
+                enc_votes,
+                enc_voter_ids,
+                enc_as,
+                enc_bs,
+                enc_r_as,
+                enc_r_bs,
+                proof,
+                signed_by,
+                signature
+            })
+        }
+
+        Ok(proofs)
+    }
+
     pub async fn get_vote_decrypt(&self, session: &Uuid) -> Result<Vec<Vec<SignedDecryptShareSet>>, DbError> {
         let rows = self.client.query("
             SELECT trustee, signature, share, index
@@ -1112,6 +1186,61 @@ impl DbClient {
         }
 
         Ok(result)
+    }
+
+
+    pub async fn get_accepted_mix_proofs(&self, session: &Uuid) -> Result<Vec<AcceptedMixProof>, DbError> {
+        let mix_indexes = self.client.query("
+            SELECT DISTINCT mix_index
+            FROM wbb_accepted_mix
+            WHERE session=$1;
+        ", &[session]).await?;
+
+        let mut proofs = Vec::new();
+        for row in mix_indexes {
+            let mix_index: i16 = row.get(0);
+            let enc_rows = self.client.query("
+                SELECT enc_vote, enc_voter_id
+                FROM wbb_accepted_mix
+                WHERE session=$1 AND mix_index=$2
+                ORDER BY index;
+            ", &[session, &mix_index]).await?;
+            let mut enc_votes = Vec::new();
+            let mut enc_voter_ids = Vec::new();
+            for row in enc_rows {
+                // Deserialise
+                let s: String = row.get(0);
+                let vote = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("vote"))?;
+                let s: String = row.get(1);
+                let id = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("voter id"))?;
+                // Push data
+                enc_votes.push(vote);
+                enc_voter_ids.push(id);
+            }
+
+            let row = self.client.query_one("
+                SELECT proof, signed_by, signature
+                FROM wbb_accepted_mix_proofs
+                WHERE session=$1 AND mix_index=$2;
+            ", &[session, &mix_index]).await?;
+            let proof: String = row.get("proof");
+            let proof: ShuffleProof = serde_json::from_str(&proof).map_err(|_| DbError::SchemaFailure("proof"))?;
+            let signed_by: Uuid = row.get("signed_by");
+            let signature: String = row.get("signature");
+            let signature = Signature::try_from_base64(&signature)
+                .map_err(|_| DbError::SchemaFailure("signature"))?;
+
+            proofs.push(AcceptedMixProof {
+                index: mix_index,
+                enc_votes,
+                enc_voter_ids,
+                proof,
+                signed_by,
+                signature
+            })
+        }
+
+        Ok(proofs)
     }
 
     pub async fn get_all_accepted_decryptions(&self, session: &Uuid) -> Result<HashMap<Uuid, HashMap<i32, SignedDecryptShare>>, DbError> {

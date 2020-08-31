@@ -81,7 +81,8 @@ async fn verify_voter(cfg: &PapervoteConfig, voter_id: VoterId) -> Result<()> {
     Ok(())
 }
 
-async fn verify_all(_cfg: &PapervoteConfig) -> Result<bool> {
-    // TODO: Extend database code to be able to fetch all the proofs, and then check them.
+async fn verify_all(cfg: &PapervoteConfig) -> Result<bool> {
+    // TODO: Run verify spec using WBB info.
+
     Ok(true)
 }

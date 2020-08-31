@@ -107,12 +107,38 @@ pub struct WrappedResponse {
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
+pub struct VoteMixProof {
+    pub index: i16,
+    pub enc_votes: Vec<Ciphertext>,
+    pub enc_voter_ids: Vec<Ciphertext>,
+    pub enc_as: Vec<Ciphertext>,
+    pub enc_bs: Vec<Ciphertext>,
+    pub enc_r_as: Vec<Ciphertext>,
+    pub enc_r_bs: Vec<Ciphertext>,
+    pub proof: ShuffleProof,
+    pub signed_by: Uuid,
+    pub signature: Signature,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptedMixProof {
+    pub index: i16,
+    pub enc_votes: Vec<Ciphertext>,
+    pub enc_voter_ids: Vec<Ciphertext>,
+    pub proof: ShuffleProof,
+    pub signed_by: Uuid,
+    pub signature: Signature,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
     PublicKey(SigningPubKey),
     ResultSet(Vec<SignedMessage>),
     Ciphertexts(Vec<Vec<Ciphertext>>),
+    VoteMixProofs(Vec<VoteMixProof>),
     AcceptedRows(Vec<AcceptedRow>),
     AcceptedMixRows(Vec<AcceptedMixRow>),
+    AcceptedMixProofs(Vec<AcceptedMixProof>),
     DecryptShares(Vec<Vec<SignedDecryptShareSet>>),
     Idents(Vec<VoterIdent>),
     PetCommits(HashMap<Uuid, HashMap<VoterId, (Signature, CtCommitment, CtCommitment)>>),
