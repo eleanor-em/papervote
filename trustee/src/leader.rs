@@ -10,18 +10,18 @@ use common::APP_NAME;
 use tokio::time::Duration;
 use tokio::time;
 use std::sync::Arc;
-use common::voter::Vote;
+use common::voter::{Vote, Candidate};
+use std::collections::HashMap;
 
 fn with_newline(msg: ControlMessage) -> Vec<u8> {
     format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes().to_vec()
 }
 
-pub async fn run_leader(index: usize, addresses: Vec<&str>) -> Result<()> {
+pub async fn run_leader(index: usize, addresses: Vec<&str>, from_file: Option<&str>) -> Result<()> {
     let cfg: PapervoteConfig = confy::load(APP_NAME)?;
     let candidates = common::voter::candidates_from_file(&cfg.candidate_file)?;
+    let candidates = Arc::new(candidates);
     let ctx = CryptoContext::new()?;
-
-    open_session(&cfg, cfg.session_id.clone()).await?;
 
     let mut streams = Vec::new();
     for address in addresses {
@@ -35,16 +35,12 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>) -> Result<()> {
         }
     }
 
-    // Create trustee
-    for stream in streams.iter_mut() {
-        stream.write_all(&with_newline(ControlMessage::Begin)).await?;
-    }
-    let mut trustee = Trustee::new(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
-                                   cfg.session_id, ctx, index, cfg.min_trustees, cfg.trustee_count).await?;
-    wait_for_ok(&mut streams).await?;
+    let mut trustee = match from_file {
+        None => run_leader_gen(&cfg, &ctx, candidates.clone(), &mut streams, index).await?,
+        Some(file) => run_leader_existing(&cfg, &ctx, &mut streams, index, file).await?,
+    };
 
     println!("Opening votes.");
-    let candidates = Arc::new(candidates);
     trustee.receive_voter_data(candidates.clone());
 
     // For now, wait for input to close votes
@@ -56,6 +52,7 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>) -> Result<()> {
     // First shuffle
     println!("first shuffle");
     trustee.mix_votes().await?;
+
     // Shuffle in order
     for stream in streams.iter_mut() {
         stream.write_all(&with_newline(ControlMessage::FirstShuffle)).await?;
@@ -141,6 +138,30 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub async fn run_leader_gen(cfg: &PapervoteConfig, ctx: &CryptoContext, candidates: Arc<HashMap<u64, Candidate>>, mut streams: &mut [TcpStream], index: usize) -> Result<Trustee> {
+    open_session(&cfg, cfg.session_id.clone()).await?;
+
+    // Create trustee
+    for stream in streams.iter_mut() {
+        stream.write_all(&with_newline(ControlMessage::Begin)).await?;
+    }
+    let mut trustee = Trustee::new(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
+                                   cfg.session_id, ctx.clone(), index, cfg.min_trustees, cfg.trustee_count).await?;
+    wait_for_ok(&mut streams).await?;
+    Ok(trustee)
+}
+
+pub async fn run_leader_existing(cfg: &PapervoteConfig, ctx: &CryptoContext, mut streams: &mut[TcpStream], index: usize, file: &str) -> Result<Trustee> {
+    let trustee = Trustee::from_file(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
+                                         cfg.session_id, ctx.clone(), index, cfg.min_trustees, cfg.trustee_count, file).await?;
+    for stream in streams.iter_mut() {
+        stream.write_all(&with_newline(ControlMessage::Begin)).await?;
+        stream.flush().await?;
+    }
+    wait_for_ok(&mut streams).await?;
+    Ok(trustee)
 }
 
 async fn open_session(cfg: &PapervoteConfig, session_id: Uuid) -> Result<()> {

@@ -1,5 +1,5 @@
-
 #![feature(assoc_char_funcs)]
+
 pub mod config;
 pub mod net;
 pub mod sign;

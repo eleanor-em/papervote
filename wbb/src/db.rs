@@ -702,7 +702,7 @@ impl DbClient {
         for row in rows {
             let sender_id: Uuid = row.get("trustee");
             let commitment: String = row.get("commitment");
-            let commitment = commitment.try_into()
+            let commitment = commitment.as_str().try_into()
                 .map_err(|_| DbError::SchemaFailure("commitment"))?;
             let signature: String = row.get("signature");
             let signature = Signature::try_from_base64(&signature)
@@ -766,17 +766,17 @@ impl DbClient {
         let mut result = Vec::new();
         for row in rows {
             let s: String = row.get(0);
-            let vote = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("vote"))?;
+            let vote = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("vote"))?;
             let s: String = row.get(1);
-            let id = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("voter id"))?;
+            let id = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("voter id"))?;
             let s: String = row.get(2);
-            let a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("a"))?;
+            let a = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("a"))?;
             let s: String = row.get(3);
-            let b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("b"))?;
+            let b = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("b"))?;
             let s: String = row.get(4);
-            let r_a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_a"))?;
+            let r_a = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("r_a"))?;
             let s: String = row.get(5);
-            let r_b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_b"))?;
+            let r_b = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("r_b"))?;
             result.push(vec![vote, id, a, b, r_a, r_b]);
         }
 
@@ -794,17 +794,17 @@ impl DbClient {
         let mut result = Vec::new();
         for row in rows {
             let s: String = row.get(0);
-            let vote = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("vote"))?;
+            let vote = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("vote"))?;
             let s: String = row.get(1);
-            let id = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("voter id"))?;
+            let id = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("voter id"))?;
             let s: String = row.get(2);
-            let a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("a"))?;
+            let a = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("a"))?;
             let s: String = row.get(3);
-            let b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("b"))?;
+            let b = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("b"))?;
             let s: String = row.get(4);
-            let r_a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_a"))?;
+            let r_a = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("r_a"))?;
             let s: String = row.get(5);
-            let r_b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_b"))?;
+            let r_b = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("r_b"))?;
             result.push(vec![vote, id, a, b, r_a, r_b]);
         }
 
@@ -836,17 +836,17 @@ impl DbClient {
             for row in enc_rows {
                 // Deserialise
                 let s: String = row.get(0);
-                let vote = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("vote"))?;
+                let vote = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("vote"))?;
                 let s: String = row.get(1);
-                let id = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("voter id"))?;
+                let id = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("voter id"))?;
                 let s: String = row.get(2);
-                let a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("a"))?;
+                let a = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("a"))?;
                 let s: String = row.get(3);
-                let b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("b"))?;
+                let b = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("b"))?;
                 let s: String = row.get(4);
-                let r_a = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_a"))?;
+                let r_a = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("r_a"))?;
                 let s: String = row.get(5);
-                let r_b = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("r_b"))?;
+                let r_b = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("r_b"))?;
                 // Push data
                 enc_votes.push(vote);
                 enc_voter_ids.push(id);
@@ -934,11 +934,11 @@ impl DbClient {
             let voter_id = VoterId::from(voter_id);
 
             let c_a: String = row.get("c_a");
-            let c_a = Commitment::try_from(c_a)
+            let c_a = Commitment::try_from(c_a.as_str())
                 .map_err(|_| DbError::SchemaFailure("c_a"))?;
 
             let c_b: String = row.get("c_b");
-            let c_b = Commitment::try_from(c_b)
+            let c_b = Commitment::try_from(c_b.as_str())
                 .map_err(|_| DbError::SchemaFailure("c_b"))?;
 
             result.push(VoterIdent { id: voter_id, c_a, c_b });
@@ -958,11 +958,11 @@ impl DbClient {
             let voter_id = VoterId::from(voter_id);
 
             let enc_mac: String = row.get("enc_mac");
-            let enc_mac = Ciphertext::try_from(enc_mac)
+            let enc_mac = Ciphertext::try_from(enc_mac.as_str())
                 .map_err(|_| DbError::SchemaFailure("enc_mac"))?;
 
             let enc_vote: String = row.get("enc_vote");
-            let enc_vote = Ciphertext::try_from(enc_vote)
+            let enc_vote = Ciphertext::try_from(enc_vote.as_str())
                 .map_err(|_| DbError::SchemaFailure("enc_vote"))?;
 
             let sender_id = row.get("signed_by");
@@ -999,15 +999,15 @@ impl DbClient {
             let voter_id = VoterId::from(voter_id);
 
             let vote_commit: String = row.get("vote_commit");
-            let vote_commit = CtCommitment::try_from(vote_commit)
+            let vote_commit = CtCommitment::try_from(vote_commit.as_str())
                 .map_err(|_| DbError::SchemaFailure("vote_commit"))?;
 
             let mac_commit: String = row.get("mac_commit");
-            let mac_commit = CtCommitment::try_from(mac_commit)
+            let mac_commit = CtCommitment::try_from(mac_commit.as_str())
                 .map_err(|_| DbError::SchemaFailure("mac_commit"))?;
 
             let signature: String = row.get("signature");
-            let signature = Signature::try_from_base64(&signature)
+            let signature = Signature::try_from_base64(signature.as_str())
                 .map_err(|_| DbError::SchemaFailure("signature"))?;
 
             result.entry(trustee)
@@ -1035,39 +1035,39 @@ impl DbClient {
             let voter_id = VoterId::from(voter_id);
 
             let vote_ct: String = row.get("vote_ct");
-            let vote_ct = Ciphertext::try_from(vote_ct)
+            let vote_ct = Ciphertext::try_from(vote_ct.as_str())
                 .map_err(|_| DbError::SchemaFailure("vote_ct"))?;
 
             let vote_r1: String = row.get("vote_r1");
-            let vote_r1 = Scalar::try_from_base64(&vote_r1)
+            let vote_r1 = Scalar::try_from_base64(vote_r1.as_str())
                 .map_err(|_| DbError::SchemaFailure("vote_r1"))?;
 
             let vote_r2: String = row.get("vote_r2");
-            let vote_r2 = Scalar::try_from_base64(&vote_r2)
+            let vote_r2 = Scalar::try_from_base64(vote_r2.as_str())
                 .map_err(|_| DbError::SchemaFailure("vote_r2"))?;
 
             let mac_ct: String = row.get("mac_ct");
-            let mac_ct = Ciphertext::try_from(mac_ct)
+            let mac_ct = Ciphertext::try_from(mac_ct.as_str())
                 .map_err(|_| DbError::SchemaFailure("mac_ct"))?;
 
             let mac_r1: String = row.get("mac_r1");
-            let mac_r1 = Scalar::try_from_base64(&mac_r1)
+            let mac_r1 = Scalar::try_from_base64(mac_r1.as_str())
                 .map_err(|_| DbError::SchemaFailure("mac_r1"))?;
 
             let mac_r2: String = row.get("mac_r2");
-            let mac_r2 = Scalar::try_from_base64(&mac_r2)
+            let mac_r2 = Scalar::try_from_base64(mac_r2.as_str())
                 .map_err(|_| DbError::SchemaFailure("mac_r2"))?;
 
             let vote_proof: String = row.get("vote_proof");
-            let vote_proof: PrfEqDlogs = serde_json::from_str(&vote_proof)
+            let vote_proof: PrfEqDlogs = serde_json::from_str(vote_proof.as_str())
                 .map_err(|_| DbError::SchemaFailure("vote_proof"))?;
 
             let mac_proof: String = row.get("mac_proof");
-            let mac_proof: PrfEqDlogs = serde_json::from_str(&mac_proof)
+            let mac_proof: PrfEqDlogs = serde_json::from_str(mac_proof.as_str())
                 .map_err(|_| DbError::SchemaFailure("mac_proof"))?;
 
             let signature: String = row.get("signature");
-            let signature = Signature::try_from_base64(&signature)
+            let signature = Signature::try_from_base64(signature.as_str())
                 .map_err(|_| DbError::SchemaFailure("signature"))?;
 
             let vote_opening = CtOpening {
@@ -1151,7 +1151,7 @@ impl DbClient {
             let voter_id = VoterId::from(voter_id);
 
             let enc_voter_id: String = row.get("enc_voter_id");
-            let enc_voter_id = Ciphertext::try_from(enc_voter_id)
+            let enc_voter_id = Ciphertext::try_from(enc_voter_id.as_str())
                 .map_err(|_| DbError::SchemaFailure("enc_voter_id"))?;
 
             let enc_proof: String = row.get("enc_proof");
@@ -1159,7 +1159,7 @@ impl DbClient {
                 .map_err(|_| DbError::SchemaFailure("enc_proof"))?;
 
             let enc_vote: String = row.get("enc_vote");
-            let enc_vote = Ciphertext::try_from(enc_vote)
+            let enc_vote = Ciphertext::try_from(enc_vote.as_str())
                 .map_err(|_| DbError::SchemaFailure("enc_vote"))?;
 
             result.push(AcceptedRow { voter_id, enc_voter_id, enc_proof, enc_vote });
@@ -1179,9 +1179,9 @@ impl DbClient {
         let mut result = Vec::new();
         for row in rows {
             let vote: String = row.get(0);
-            let vote = Ciphertext::try_from(vote).map_err(|_| DbError::SchemaFailure("vote"))?;
+            let vote = Ciphertext::try_from(vote.as_str()).map_err(|_| DbError::SchemaFailure("vote"))?;
             let id: String = row.get(1);
-            let id = Ciphertext::try_from(id).map_err(|_| DbError::SchemaFailure("voter id"))?;
+            let id = Ciphertext::try_from(id.as_str()).map_err(|_| DbError::SchemaFailure("voter id"))?;
             result.push(AcceptedMixRow { vote, id });
         }
 
@@ -1210,9 +1210,9 @@ impl DbClient {
             for row in enc_rows {
                 // Deserialise
                 let s: String = row.get(0);
-                let vote = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("vote"))?;
+                let vote = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("vote"))?;
                 let s: String = row.get(1);
-                let id = Ciphertext::try_from(s).map_err(|_| DbError::SchemaFailure("voter id"))?;
+                let id = Ciphertext::try_from(s.as_str()).map_err(|_| DbError::SchemaFailure("voter id"))?;
                 // Push data
                 enc_votes.push(vote);
                 enc_voter_ids.push(id);

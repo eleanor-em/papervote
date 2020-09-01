@@ -34,6 +34,8 @@ mod api;
 pub mod follower;
 mod gen;
 pub mod leader;
+pub mod receive;
+pub mod check_proof;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ControlMessage {
@@ -122,6 +124,15 @@ pub struct PetData {
     mac_proof: PrfEqDlogs,
     vote_commit: CtCommitment,
     mac_commit: CtCommitment,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct GeneratedData {
+    pubkey: PublicKey,
+    pubkey_proof: PubkeyProof,
+    secret_share: Scalar,
+    signing_seed: String,
+    id: Uuid,
 }
 
 pub struct Trustee {
@@ -219,6 +230,16 @@ impl Trustee {
 
         println!("Trustee {} done: {}", index, party.pubkey().as_base64());
 
+        // Save trustee data
+        let gen = GeneratedData {
+            pubkey: party.pubkey(),
+            pubkey_proof: party.pubkey_proof(),
+            secret_share: party.private_share(),
+            signing_seed: base64::encode(trustee.signing_keypair.seed()),
+            id: trustee.id,
+        };
+        std::fs::write(format!("trustee-{}.json", index), serde_json::to_string(&gen).unwrap())?;
+
         let info = InternalInfo {
             api_base_addr,
             address: trustee.trustee_info[&trustee.id].address.clone(),
@@ -233,7 +254,62 @@ impl Trustee {
             pubkey_proof: party.pubkey_proof(),
         };
 
-        // TODO: Store on disk.
+        Ok(Trustee {
+            info,
+            trustee_info: trustee.trustee_info,
+            failed_voter_ids: Arc::new(Mutex::new(Vec::new())),
+            received_votes: Arc::new(Mutex::new(Vec::new())),
+            downloaded_votes: None,
+            party,
+            abort_handle: None,
+            log: trustee.log,
+        })
+    }
+    pub async fn from_file(api_base_addr: String,
+                     advertised_addr: String,
+                     session_id: Uuid,
+                     ctx: CryptoContext,
+                     index: usize,
+                     min_trustees: usize,
+                     trustee_count: usize,
+                     file: &str) -> Result<Trustee, TrusteeError> {
+        let gen_text = std::fs::read_to_string(file)?;
+        let gen: GeneratedData = serde_json::from_str(&gen_text)?;
+
+        let mut trustee = GeneratingTrustee::from_seed(
+            api_base_addr.clone(),
+            advertised_addr,
+            session_id.clone(),
+            &ctx,
+            index,
+            min_trustees,
+            trustee_count,
+            &base64::decode(gen.signing_seed).map_err(|_| TrusteeError::Decode)?,
+            gen.id,
+        )?;
+
+        let client = reqwest::Client::new();
+        let msg = trustee.gen_registration();
+        trustee.get_registrations(&msg, &client).await?;
+
+        let party = ThresholdParty::from_existing(
+            &ctx, index, min_trustees, trustee_count, gen.secret_share, gen.pubkey_proof, gen.pubkey
+        );
+
+        let info = InternalInfo {
+            api_base_addr,
+            address: trustee.trustee_info[&trustee.id].address.clone(),
+            index,
+            id: trustee.id,
+            session_id,
+            client,
+            signing_keypair: Arc::new(trustee.signing_keypair),
+            ctx,
+            commit_ctx: PedersenCtx::new(session_id.as_bytes()),
+            pubkey: party.pubkey(),
+            pubkey_proof: party.pubkey_proof(),
+        };
+
         Ok(Trustee {
             info,
             trustee_info: trustee.trustee_info,

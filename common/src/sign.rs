@@ -30,7 +30,7 @@ impl AsBase64 for Signature {
 base64_serde!(crate::sign::Signature);
 
 #[derive(Debug)]
-pub struct SigningKeypair(Ed25519KeyPair);
+pub struct SigningKeypair(Ed25519KeyPair, [u8; 32]);
 
 impl SigningKeypair {
     pub fn new(ctx: &CryptoContext) -> Self {
@@ -38,9 +38,17 @@ impl SigningKeypair {
         let mut rng = rng.lock().unwrap();
         let mut seed = [0; 32];
         rng.fill_bytes(&mut seed);
-        // Below call cannot fail
+        Self::from_seed(&seed)
+    }
+
+    pub fn from_seed(seed: &[u8]) -> Self {
+        let mut seed_vec = Vec::new();
+        seed_vec.extend_from_slice(seed);
+        seed_vec.resize(32, 0);
+        let mut seed = [0; 32];
+        seed.clone_from_slice(&seed_vec);
         println!("signing keypair seed: {}", base64::encode(&seed));
-        Self(Ed25519KeyPair::from_seed_unchecked(&seed).unwrap())
+        Self(Ed25519KeyPair::from_seed_unchecked(&seed).unwrap(), seed)
     }
 
     pub fn sign(&self, bytes: &[u8]) -> Signature {
@@ -50,6 +58,8 @@ impl SigningKeypair {
     pub fn public_key(&self) -> SigningPubKey {
         self.0.public_key().into()
     }
+
+    pub fn seed(&self) -> &[u8] { &self.1 }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

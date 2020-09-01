@@ -10,7 +10,7 @@ fn with_newline(msg: ControlMessage) -> Vec<u8> {
     format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes().to_vec()
 }
 
-pub async fn run_follower(index: usize, port: u16) -> Result<()> {
+pub async fn run_follower(index: usize, port: u16, from_file: Option<&str>) -> Result<()> {
     let cfg: PapervoteConfig = confy::load(APP_NAME)?;
     let ctx = CryptoContext::new()?;
 
@@ -27,8 +27,12 @@ pub async fn run_follower(index: usize, port: u16) -> Result<()> {
 
     let mut trustee = if let Ok(ControlMessage::Begin) = serde_json::from_str(&buffer) {
         println!("creating trustee");
-        Trustee::new(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
-                     cfg.session_id, ctx, index, cfg.min_trustees, cfg.trustee_count).await?
+        match from_file {
+            None => Trustee::new(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
+                                 cfg.session_id, ctx, index, cfg.min_trustees, cfg.trustee_count).await?,
+            Some(file) => Trustee::from_file(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
+                                             cfg.session_id, ctx, index, cfg.min_trustees, cfg.trustee_count, file).await?
+        }
     } else {
         panic!("unexpected message from leader");
     };

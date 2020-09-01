@@ -77,6 +77,46 @@ impl GeneratingTrustee {
 
         Ok(true)
     }
+    pub fn from_seed(
+        api_base_addr: String,
+        advertised_addr: String,
+        session_id: Uuid,
+        ctx: &CryptoContext,
+        index: usize,
+        k: usize,
+        n: usize,
+        seed: &[u8],
+        id: Uuid,
+    ) -> Result<GeneratingTrustee, CryptoError> {
+        let mut ctx = ctx.clone();
+
+        // Generate a signature keypair
+        let signing_keypair = SigningKeypair::from_seed(seed);
+
+        // Create identification for this trustee
+        let port = 14000 + index;
+        let mut trustee_info = HashMap::new();
+        let my_info = TrusteeInfo {
+            id,
+            pubkey: signing_keypair.public_key().into(),
+            pubkey_proof: None,
+            index,
+            address: format!("{}:{}", advertised_addr, port),
+        };
+        trustee_info.insert(id, my_info);
+
+        let generator = ThresholdGenerator::new(&mut ctx, index, k, n);
+
+        Ok(Self {
+            api_base_addr,
+            session_id,
+            id,
+            signing_keypair,
+            trustee_info,
+            generator,
+            log: Hasher::sha_256(),
+        })
+    }
 
     pub fn gen_registration(&self) -> SignedMessage {
         let msg = TrusteeMessage::Info { info: self.trustee_info[&self.id].clone() };
