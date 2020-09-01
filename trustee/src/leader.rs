@@ -40,15 +40,6 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>, from_file: Option<&s
         Some(file) => run_leader_existing(&cfg, &ctx, &mut streams, index, file).await?,
     };
 
-    println!("Opening votes.");
-    trustee.receive_voter_data(candidates.clone());
-
-    // For now, wait for input to close votes
-    let mut buffer = String::new();
-    std::io::stdin().read_line(&mut buffer)?;
-
-    trustee.close_votes().await?;
-
     // First shuffle
     println!("first shuffle");
     trustee.mix_votes().await?;
@@ -150,6 +141,16 @@ pub async fn run_leader_gen(cfg: &PapervoteConfig, ctx: &CryptoContext, candidat
     let mut trustee = Trustee::new(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
                                    cfg.session_id, ctx.clone(), index, cfg.min_trustees, cfg.trustee_count).await?;
     wait_for_ok(&mut streams).await?;
+
+    println!("Opening votes.");
+    trustee.receive_voter_data(candidates.clone());
+
+    // For now, wait for input to close votes
+    let mut buffer = String::new();
+    std::io::stdin().read_line(&mut buffer)?;
+
+    trustee.close_votes().await?;
+
     Ok(trustee)
 }
 
