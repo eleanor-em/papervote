@@ -726,7 +726,13 @@ impl Trustee {
 
         // Check uniqueness of IDs and EC commitments
         let unique_rows: Vec<_> = rows.into_iter()
-            .filter(|(voter_id, _, _, _, _)| voter_id_counts[voter_id] == 1)
+            .filter(|(voter_id, _, _, _, _)| {
+                let result = voter_id_counts[voter_id] == 1;
+                if !result {
+                    println!("Voter {} did not have a unique entry in the mixed votes, excluding.", voter_id);
+                }
+                result
+            })
             .collect();
 
         // Get idents
