@@ -30,7 +30,7 @@ use crate::gen::GeneratingTrustee;
 use common::trustee::{CtOpening, SignedDecryptShareSet, SignedPetOpening, SignedPetDecryptShare, SignedDecryptShare};
 use itertools::Itertools;
 
-mod api;
+pub mod api;
 pub mod follower;
 mod gen;
 pub mod leader;

@@ -1,13 +1,10 @@
 use common::config::PapervoteConfig;
-use common::net::{Response, TrusteeMessage};
 use common::APP_NAME;
-use cryptid::elgamal::{CryptoContext, PublicKey};
+use cryptid::elgamal::CryptoContext;
 use cryptid::commit::PedersenCtx;
 use uuid::Uuid;
-use voter::{Voter, VoterError};
-use common::net::{WrappedResponse, TrusteeInfo};
+use voter::{Voter, get_trustee_info, get_pubkey};
 use eyre::Result;
-use reqwest::Client;
 use cryptid::{AsBase64, Scalar};
 use common::voter::{Vote, Candidate, Ballot};
 use tokio::time;
@@ -38,13 +35,13 @@ async fn main() -> Result<()> {
         println!("retrying trustee download...");
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
-    let trustees = trustees.unwrap();
+    let mut trustees = trustees.unwrap();
     println!("Downloaded trustee information.");
 
     // Fetch the public key
     let mut pubkey = None;
     loop {
-        if let Ok(val) = get_pubkey(&cfg, &trustees, &client).await {
+        if let Ok(val) = get_pubkey(&cfg, &mut trustees, &client).await {
             pubkey.replace(val);
             break;
         }
@@ -95,102 +92,9 @@ async fn main() -> Result<()> {
     println!("{}", vote_str);
     println!("Your identification (save this for verification later) (Paper 2):");
     println!("\tID: {}", voter_id_str);
-    save_ballots(ballot, prf_enc_id, voter_id_str, vote_str)?;
+    save_ballots(&cfg, ballot, prf_enc_id, voter_id_str, vote_str)?;
 
     Ok(())
-}
-
-async fn get_trustee_info(cfg: &PapervoteConfig, client: &Client) -> Result<Vec<TrusteeInfo>> {
-    let response: WrappedResponse = client.get(&format!("{}/{}/trustee/all", cfg.api_url, cfg.session_id))
-        .send().await?
-        .json().await?;
-
-    if !response.status {
-        return Err(VoterError::Api(response.msg))?;
-    }
-
-    if let Response::ResultSet(messages) = response.msg {
-        let mut trustees = Vec::new();
-
-        // Extract the info
-        for msg in messages {
-            if let TrusteeMessage::Info { info } = &msg.inner {
-                // Check the signature
-                if msg.verify(&info.pubkey)? {
-                    trustees.push(info.clone());
-                } else {
-                    eprintln!("Failed verifying trustee signature: {}", info.id);
-                    return Err(VoterError::Decode)?;
-                }
-            } else {
-                eprintln!("Failed decoding trustee info message.");
-                return Err(VoterError::Decode)?;
-            }
-        }
-
-        Ok(trustees)
-    } else {
-        eprintln!("Failed decoding WBB response.");
-        return Err(VoterError::Decode)?;
-    }
-}
-
-async fn get_pubkey(cfg: &PapervoteConfig, trustees: &[TrusteeInfo], client: &Client) -> Result<PublicKey> {
-    let response: WrappedResponse = client.get(&format!("{}/{}/keygen/sign/all", cfg.api_url, cfg.session_id))
-        .send().await?
-        .json().await?;
-
-    if !response.status {
-        return Err(VoterError::Api(response.msg))?;
-    }
-
-    if let Response::ResultSet(messages) = response.msg {
-        let mut pubkey = None;
-
-        // Extract the info
-        for msg in messages {
-            if let TrusteeMessage::KeygenSign { pubkey: msg_pubkey, pubkey_proof: _ } = &msg.inner {
-                let mut verified = false;
-                // Look up correct signing public key
-                for trustee in trustees {
-                    if trustee.id == msg.sender_id {
-                        // Check the signature
-                        if msg.verify(&trustee.pubkey)? {
-                            verified = true;
-                            match pubkey {
-                                None => {
-                                    pubkey = Some(msg_pubkey.clone());
-                                    break;
-                                },
-                                Some(existing) => {
-                                    if existing != *msg_pubkey {
-                                        eprintln!("Trustees committed to inconsistent public keys.");
-                                        return Err(VoterError::Decode)?;
-                                    }
-                                }
-                            }
-                        } else {
-                            eprintln!("Failed verifying trustee signature: {}", trustee.id);
-                            return Err(VoterError::Decode)?;
-                        }
-                    }
-                }
-
-                if !verified {
-                    eprintln!("Unrecognised trustee: {}", msg.sender_id);
-                    return Err(VoterError::Decode)?;
-                }
-            } else {
-                eprintln!("Failed decoding pubkey message.");
-                return Err(VoterError::Decode)?;
-            }
-        }
-
-        Ok(pubkey.unwrap())
-    } else {
-        eprintln!("Failed decoding WBB response.");
-        return Err(VoterError::Decode)?;
-    }
 }
 
 fn get_vote(candidates: HashMap<u64, Candidate>) -> Result<Vote> {
@@ -226,13 +130,17 @@ fn get_vote(candidates: HashMap<u64, Candidate>) -> Result<Vote> {
     Ok(vote)
 }
 
-fn save_ballots(ballot: Ballot, prf_enc_id: Scalar, voter_id_str: String, vote_str: String) -> Result<()> {
+fn save_ballots(cfg: &PapervoteConfig, ballot: Ballot, prf_enc_id: Scalar, voter_id_str: String, vote_str: String) -> Result<()> {
     let ec_level = EcLevel::Q;
+
+    // Save a copy of the raw data as well in debug mode
+    let mut raw_data = Vec::new();
     
     let mut data = Vec::new();
     data.extend(ballot.p1_enc_a.to_string().as_bytes());
     data.push(b'-');
     data.extend(ballot.p1_enc_b.to_string().as_bytes());
+    raw_data.push(data.clone());
     let image = QrCode::with_error_correction_level(&data, ec_level)?.render::<image::Luma<u8>>().build();
     image.save("paper1-enc1-img.bmp")?;
 
@@ -240,6 +148,7 @@ fn save_ballots(ballot: Ballot, prf_enc_id: Scalar, voter_id_str: String, vote_s
     data.extend(ballot.p1_enc_r_a.to_string().as_bytes());
     data.push(b'-');
     data.extend(ballot.p1_enc_r_b.to_string().as_bytes());
+    raw_data.push(data.clone());
     let image = QrCode::with_error_correction_level(&data, ec_level)?.render::<image::Luma<u8>>().build();
     image.save("paper1-enc2-img.bmp")?;
 
@@ -247,6 +156,7 @@ fn save_ballots(ballot: Ballot, prf_enc_id: Scalar, voter_id_str: String, vote_s
     data.extend(ballot.p1_prf_a.to_string().as_bytes());
     data.push(b'_');
     data.extend(ballot.p1_prf_b.to_string().as_bytes());
+    raw_data.push(data.clone());
     let image = QrCode::with_error_correction_level(&data, ec_level)?.render::<image::Luma<u8>>().build();
     image.save("paper1-prf1-img.bmp")?;
 
@@ -254,6 +164,7 @@ fn save_ballots(ballot: Ballot, prf_enc_id: Scalar, voter_id_str: String, vote_s
     data.extend(ballot.p1_prf_r_a.to_string().as_bytes());
     data.push(b'_');
     data.extend(ballot.p1_prf_r_b.to_string().as_bytes());
+    raw_data.push(data.clone());
     let image = QrCode::with_error_correction_level(&data, ec_level)?.render::<image::Luma<u8>>().build();
     image.save("paper1-prf2-img.bmp")?;
 
@@ -261,7 +172,7 @@ fn save_ballots(ballot: Ballot, prf_enc_id: Scalar, voter_id_str: String, vote_s
     data.extend(ballot.p2_enc_id.to_string().as_bytes());
     data.push(b'-');
     data.extend(prf_enc_id.as_base64().as_bytes());
-
+    raw_data.push(data.clone());
     let image = QrCode::new(&data)?.render::<image::Luma<u8>>().build();
     image.save("paper2-img.bmp")?;
 
@@ -311,6 +222,19 @@ fn save_ballots(ballot: Ballot, prf_enc_id: Scalar, voter_id_str: String, vote_s
     std::fs::remove_file("paper2-img.bmp")?;
 
     println!("Files to print saved to `paper1.pdf` and `paper2.pdf`.");
+
+    // In debug mode, save raw data
+    if cfg.debug_mode {
+        let mut raw_text = String::new();
+        raw_text += &format!("{}\n", ballot.p1_vote);
+        raw_text += &format!("{}\n", std::str::from_utf8(&raw_data[4])?);
+        raw_text += &format!("{}\n", std::str::from_utf8(&raw_data[0])?);
+        raw_text += &format!("{}\n", std::str::from_utf8(&raw_data[1])?);
+        raw_text += &format!("{}\n", std::str::from_utf8(&raw_data[2])?);
+        raw_text += &format!("{}\n", std::str::from_utf8(&raw_data[3])?);
+        let mut file = std::fs::File::create(std::path::Path::new("raw.txt"))?;
+        file.write_all(raw_text.as_ref())?;
+    }
 
     Ok(())
 }

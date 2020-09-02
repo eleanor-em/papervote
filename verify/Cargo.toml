@@ -6,6 +6,7 @@ edition = "2018"
 
 [dependencies]
 common = { "path" = "../common" }
+voter = { "path" = "../voter" }
 cryptid = { git = "https://github.com/eleanor-em/cryptid" }
 tokio = { version = "0.2", features = ["full"] }
 uuid = { version = "0", features = ["serde", "v4"] }
@@ -16,3 +17,4 @@ eyre = "0"
 confy = "0"
 base64 = "0"
 clap = "2"
+itertools = "0"

@@ -11,8 +11,10 @@ use tokio::time::Duration;
 use uuid::Uuid;
 
 use common::voter::{VoterMessage, VoterId, Vote, Ballot, VoterIdent};
-use common::net::{WrappedResponse, Response};
+use common::net::{WrappedResponse, Response, TrusteeInfo, TrusteeMessage};
 use cryptid::commit::PedersenCtx;
+use common::config::PapervoteConfig;
+use reqwest::Client;
 
 #[derive(Debug)]
 pub enum VoterError {
@@ -257,5 +259,100 @@ mod tests {
             c2: received_mac.c2 - enc_mac.c2,
         };
         assert_eq!(mac_ct.decrypt(&secret_key).as_base64(), CurveElem::identity().as_base64());
+    }
+}
+
+
+pub async fn get_trustee_info(cfg: &PapervoteConfig, client: &Client) -> eyre::Result<Vec<TrusteeInfo>> {
+    let response: WrappedResponse = client.get(&format!("{}/{}/trustee/all", cfg.api_url, cfg.session_id))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(VoterError::Api(response.msg))?;
+    }
+
+    if let Response::ResultSet(messages) = response.msg {
+        let mut trustees = Vec::new();
+
+        // Extract the info
+        for msg in messages {
+            if let TrusteeMessage::Info { info } = &msg.inner {
+                // Check the signature
+                if msg.verify(&info.pubkey)? {
+                    trustees.push(info.clone());
+                } else {
+                    eprintln!("Failed verifying trustee signature: {}", info.id);
+                    return Err(VoterError::Decode)?;
+                }
+            } else {
+                eprintln!("Failed decoding trustee info message.");
+                return Err(VoterError::Decode)?;
+            }
+        }
+
+        Ok(trustees)
+    } else {
+        eprintln!("Failed decoding WBB response.");
+        return Err(VoterError::Decode)?;
+    }
+}
+
+pub async fn get_pubkey(cfg: &PapervoteConfig, trustees: &mut [TrusteeInfo], client: &Client) -> eyre::Result<PublicKey> {
+    let response: WrappedResponse = client.get(&format!("{}/{}/keygen/sign/all", cfg.api_url, cfg.session_id))
+        .send().await?
+        .json().await?;
+
+    if !response.status {
+        return Err(VoterError::Api(response.msg))?;
+    }
+
+    if let Response::ResultSet(messages) = response.msg {
+        let mut pubkey = None;
+
+        // Extract the info
+        for msg in messages {
+            if let TrusteeMessage::KeygenSign { pubkey: msg_pubkey, pubkey_proof } = &msg.inner {
+                let mut verified = false;
+                // Look up correct signing public key
+                for trustee in trustees.iter_mut() {
+                    if trustee.id == msg.sender_id {
+                        // Check the signature
+                        if msg.verify(&trustee.pubkey)? {
+                            verified = true;
+                            trustee.pubkey_proof.replace(pubkey_proof.clone());
+                            match pubkey {
+                                None => {
+                                    pubkey = Some(msg_pubkey.clone());
+                                    break;
+                                },
+                                Some(existing) => {
+                                    if existing != *msg_pubkey {
+                                        eprintln!("Trustees committed to inconsistent public keys.");
+                                        return Err(VoterError::Decode)?;
+                                    }
+                                }
+                            }
+                        } else {
+                            eprintln!("Failed verifying trustee signature: {}", trustee.id);
+                            return Err(VoterError::Decode)?;
+                        }
+                    }
+                }
+
+                if !verified {
+                    eprintln!("Unrecognised trustee: {}", msg.sender_id);
+                    return Err(VoterError::Decode)?;
+                }
+            } else {
+                eprintln!("Failed decoding pubkey message.");
+                return Err(VoterError::Decode)?;
+            }
+        }
+
+        Ok(pubkey.unwrap())
+    } else {
+        eprintln!("Failed decoding WBB response.");
+        return Err(VoterError::Decode)?;
     }
 }
