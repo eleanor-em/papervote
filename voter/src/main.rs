@@ -67,6 +67,7 @@ async fn main() -> Result<()> {
     println!("Enter your preferences (1--{}); 1 is your highest preference.", candidates.len());
     let vote = get_vote(candidates)?;
     let vote_str = vote.pretty();
+    let vote_str_short = vote.to_string();
     voter.set_vote(vote);
 
     // Submit the vote
@@ -96,7 +97,7 @@ async fn main() -> Result<()> {
 
     println!("---");
     println!("Your vote (Paper 1):");
-    println!("{}", vote_str);
+    println!("{}({})", vote_str, vote_str_short);
     println!("Your identification (save this for verification later) (Paper 2):");
     println!("\tID:        {}", ballot.p2_id);
     save_ballots(ballot, vote_str)?;
@@ -240,13 +241,13 @@ fn save_ballots(ballot: Ballot, vote_str: String) -> Result<()> {
     data.push(b'-');
     data.extend(ballot.p1_enc_r_b.to_string().as_bytes());
     data.push(b'-');
-    data.extend(ballot.p1_prf_a.to_string().as_bytes());
-    data.push(b'-');
-    data.extend(ballot.p1_prf_b.to_string().as_bytes());
-    data.push(b'-');
-    data.extend(ballot.p1_prf_r_a.to_string().as_bytes());
-    data.push(b'-');
-    data.extend(ballot.p1_prf_r_b.to_string().as_bytes());
+    // data.extend(ballot.p1_prf_a.to_string().as_bytes());
+    // data.push(b'-');
+    // data.extend(ballot.p1_prf_b.to_string().as_bytes());
+    // data.push(b'-');
+    // data.extend(ballot.p1_prf_r_a.to_string().as_bytes());
+    // data.push(b'-');
+    // data.extend(ballot.p1_prf_r_b.to_string().as_bytes());
     let image = QrCode::new(&data)?.render::<image::Luma<u8>>().build();
     image.save("paper1-img.bmp")?;
 

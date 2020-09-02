@@ -485,22 +485,22 @@ impl Trustee {
         let mut failed = false;
 
         // Check the proofs
-        if !ballot.p1_prf_a.verify() {
-            eprintln!("#{}: failed to verify proof-of-knowledge for a", info.index);
-            failed = true;
-        }
-        if !ballot.p1_prf_b.verify() {
-            eprintln!("#{}: failed to verify proof-of-knowledge for b", info.index);
-            failed = true;
-        }
-        if !ballot.p1_prf_r_a.verify() {
-            eprintln!("#{}: failed to verify proof-of-knowledge for r_a", info.index);
-            failed = true;
-        }
-        if !ballot.p1_prf_r_b.verify() {
-            eprintln!("#{}: failed to verify proof-of-knowledge for r_b", info.index);
-            failed = true;
-        }
+        // if !ballot.p1_prf_a.verify() {
+        //     eprintln!("#{}: failed to verify proof-of-knowledge for a", info.index);
+        //     failed = true;
+        // }
+        // if !ballot.p1_prf_b.verify() {
+        //     eprintln!("#{}: failed to verify proof-of-knowledge for b", info.index);
+        //     failed = true;
+        // }
+        // if !ballot.p1_prf_r_a.verify() {
+        //     eprintln!("#{}: failed to verify proof-of-knowledge for r_a", info.index);
+        //     failed = true;
+        // }
+        // if !ballot.p1_prf_r_b.verify() {
+        //     eprintln!("#{}: failed to verify proof-of-knowledge for r_b", info.index);
+        //     failed = true;
+        // }
         if failed {
             let mut vids = failed_voter_ids.lock().unwrap();
             vids.push(ballot.p2_id);

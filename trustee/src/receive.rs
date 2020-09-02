@@ -47,18 +47,18 @@ pub async fn run_receive(address: &str) -> Result<()> {
     let enc_b = Ciphertext::try_from(enc_b)?;
     let enc_r_a = Ciphertext::try_from(enc_r_a)?;
     let enc_r_b = Ciphertext::try_from(enc_r_b)?;
-    println!("Ciphertexts decoded");
+    println!("Ciphertexts decoded.");
 
-    let prf_a = PrfKnowPlaintext::try_from(prf_a)?;
-    let prf_b = PrfKnowPlaintext::try_from(prf_b)?;
-    let prf_r_a = PrfKnowPlaintext::try_from(prf_r_a)?;
-    let prf_r_b = PrfKnowPlaintext::try_from(prf_r_b)?;
+    // let prf_a = PrfKnowPlaintext::try_from(prf_a)?;
+    // let prf_b = PrfKnowPlaintext::try_from(prf_b)?;
+    // let prf_r_a = PrfKnowPlaintext::try_from(prf_r_a)?;
+    // let prf_r_b = PrfKnowPlaintext::try_from(prf_r_b)?;
 
-    if prf_a.verify() && prf_b.verify() && prf_r_a.verify() && prf_r_b.verify() {
-        println!("proofs valid");
-    } else {
-        println!("Proofs invalid, rejecting ballot.");
-    }
+    // if prf_a.verify() && prf_b.verify() && prf_r_a.verify() && prf_r_b.verify() {
+    //     println!("Proofs validated.");
+    // } else {
+    //     println!("Proofs invalid, rejecting ballot.");
+    // }
     
     let ballot = Ballot {
         p1_vote: vote,
@@ -66,10 +66,10 @@ pub async fn run_receive(address: &str) -> Result<()> {
         p1_enc_b: enc_b,
         p1_enc_r_a: enc_r_a,
         p1_enc_r_b: enc_r_b,
-        p1_prf_a: prf_a,
-        p1_prf_b: prf_b,
-        p1_prf_r_a: prf_r_a,
-        p1_prf_r_b: prf_r_b,
+        // p1_prf_a: prf_a,
+        // p1_prf_b: prf_b,
+        // p1_prf_r_a: prf_r_a,
+        // p1_prf_r_b: prf_r_b,
         p2_id: voter_id,
         p2_enc_id,
         p2_prf_enc,
