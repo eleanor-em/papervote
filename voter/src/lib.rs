@@ -137,14 +137,14 @@ impl Voter {
         }
     }
 
-    pub fn get_ballot(&mut self) -> Result<Ballot, VoterError> {
+    pub fn get_ballot(&mut self) -> Result<(Ballot, Scalar), VoterError> {
         let (a, prf_a) = self.encrypt(&self.a.clone())?;
         let (b, prf_b) = self.encrypt(&self.b.clone())?;
         let (r_a, prf_r_a) = self.encrypt(&self.r_a.clone())?;
         let (r_b, prf_r_b) = self.encrypt(&self.r_b.clone())?;
         let (id, prf_id) = self.encrypt(&self.voter_id.try_as_curve_elem().ok_or(VoterError::Decode)?)?;
 
-        Ok(Ballot {
+        Ok((Ballot {
             p1_vote: self.vote.as_ref().map(|v| v.to_string()).ok_or(VoterError::VoteMissing)?,
             p1_enc_a: a.clone(),
             p1_enc_b: b.clone(),
@@ -154,21 +154,8 @@ impl Voter {
             p1_prf_b: PrfKnowPlaintext::new(&self.ctx, b, prf_b),
             p1_prf_r_a: PrfKnowPlaintext::new(&self.ctx, r_a, prf_r_a),
             p1_prf_r_b: PrfKnowPlaintext::new(&self.ctx, r_b, prf_r_b),
-            p2_id: self.voter_id.clone(),
             p2_enc_id: id,
-            p2_prf_enc: prf_id,
-        })
-    }
-
-    pub async fn post_vote(&mut self, address: &str) -> Result<(), VoterError> {
-        let ballot = self.get_ballot()?;
-        let msg = VoterMessage::Ballot(ballot);
-        let mut stream = TcpStream::connect(address).await?;
-        stream.write_all(serde_json::to_string(&msg)
-            .map_err(|_| VoterError::Encode)?
-            .as_ref()).await?;
-
-        Ok(())
+        }, prf_id))
     }
 
     pub fn set_vote(&mut self, vote: Vote) {

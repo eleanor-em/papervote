@@ -8,7 +8,7 @@ use voter::{Voter, VoterError};
 use common::net::{WrappedResponse, TrusteeInfo};
 use eyre::Result;
 use reqwest::Client;
-use cryptid::AsBase64;
+use cryptid::{AsBase64, Scalar};
 use common::voter::{Vote, Candidate, Ballot};
 use tokio::time;
 use tokio::time::Duration;
@@ -55,10 +55,10 @@ async fn main() -> Result<()> {
     println!("Public key: {}", pubkey.as_base64());
 
     // Create an ID; just use random bytes for the prototype
-    let mut id = Uuid::new_v4().to_string()
+    let mut voter_id_str = Uuid::new_v4().to_string()
         .replace("-", "");
-    id.truncate(10);
-    let mut voter = Voter::new(cfg.session_id.clone(), pubkey, ctx.clone(), commit_ctx, id)?;
+    voter_id_str.truncate(10);
+    let mut voter = Voter::new(cfg.session_id.clone(), pubkey, ctx.clone(), commit_ctx, voter_id_str.clone())?;
 
     // Get preferences
     println!("Candidates are:");
@@ -87,23 +87,15 @@ async fn main() -> Result<()> {
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
 
-    // for debugging and testing; submit the vote over the wire
-    if cfg.debug_mode {
-        while let Err(_) = voter.post_vote(&trustees[0].address).await {
-            println!("{}: retrying vote", voter.id());
-            time::delay_for(Duration::from_millis(DELAY)).await;
-        }
-    }
-
     // Produce ballot information
-    let ballot = voter.get_ballot()?;
+    let (ballot, prf_enc_id) = voter.get_ballot()?;
 
     println!("---");
     println!("Your vote (Paper 1):");
     println!("{}", vote_str);
     println!("Your identification (save this for verification later) (Paper 2):");
-    println!("\tID: {}", ballot.p2_id);
-    save_ballots(ballot, vote_str)?;
+    println!("\tID: {}", voter_id_str);
+    save_ballots(ballot, prf_enc_id, voter_id_str, vote_str)?;
 
     Ok(())
 }
@@ -234,7 +226,7 @@ fn get_vote(candidates: HashMap<u64, Candidate>) -> Result<Vote> {
     Ok(vote)
 }
 
-fn save_ballots(ballot: Ballot, vote_str: String) -> Result<()> {
+fn save_ballots(ballot: Ballot, prf_enc_id: Scalar, voter_id_str: String, vote_str: String) -> Result<()> {
     let ec_level = EcLevel::Q;
     
     let mut data = Vec::new();
@@ -268,7 +260,7 @@ fn save_ballots(ballot: Ballot, vote_str: String) -> Result<()> {
     let mut data = Vec::new();
     data.extend(ballot.p2_enc_id.to_string().as_bytes());
     data.push(b'-');
-    data.extend(ballot.p2_prf_enc.as_base64().as_bytes());
+    data.extend(prf_enc_id.as_base64().as_bytes());
 
     let image = QrCode::new(&data)?.render::<image::Luma<u8>>().build();
     image.save("paper2-img.bmp")?;
@@ -291,7 +283,6 @@ fn save_ballots(ballot: Ballot, vote_str: String) -> Result<()> {
     let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;
     image.add_to_layer(current_layer.clone(), Some(Mm(110.0)), Some(Mm(200.0)), None, None, None, None);
 
-
     let mut image_file = File::open("paper1-prf1-img.bmp")?;
     let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;
     image.add_to_layer(current_layer.clone(), Some(Mm(25.0)), Some(Mm(105.0)), None, None, None, None);
@@ -305,7 +296,7 @@ fn save_ballots(ballot: Ballot, vote_str: String) -> Result<()> {
     let current_layer = doc.get_page(page1).get_layer(layer1);
 
     let font = doc.add_builtin_font(printpdf::BuiltinFont::Courier)?;
-    current_layer.use_text(&format!("Paper 2 -- VoterID: {}", ballot.p2_id.to_string()), 14, Mm(25.0), Mm(270.0), &font);
+    current_layer.use_text(&format!("Paper 2 -- VoterID: {}", voter_id_str), 14, Mm(25.0), Mm(270.0), &font);
 
     let mut image_file = File::open("paper2-img.bmp")?;
     let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;

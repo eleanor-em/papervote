@@ -1,8 +1,7 @@
 use eyre::Result;
 use cryptid::elgamal::Ciphertext;
 use std::convert::TryFrom;
-use cryptid::{Scalar, AsBase64};
-use common::voter::{VoterMessage, Ballot, VoterId};
+use common::voter::{VoterMessage, Ballot};
 use tokio::net::TcpStream;
 use tokio::io::AsyncWriteExt;
 use cryptid::zkp::PrfKnowPlaintext;
@@ -11,51 +10,92 @@ pub async fn run_receive(address: &str) -> Result<()> {
     let stdin = std::io::stdin();
 
     let mut input = String::new();
-    println!("Enter voter ID:");
-    stdin.read_line(&mut input)?;
-    let voter_id = VoterId::from(input.trim().to_string());
-
-    let mut input = String::new();
     println!("Enter vote:");
     stdin.read_line(&mut input)?;
     let vote = input.trim().to_string();
 
     let mut input = String::new();
-    println!("Enter Paper 2 data:");
+    println!("Paper 2 encryption:");
     stdin.read_line(&mut input)?;
     let mut parts = input.split('-');
-    let ct_str = parts.next().unwrap().trim();
-    let scalar_str = parts.next().unwrap().trim();
+    let ct_str = parts.next()
+        .expect("Malformed encryption (missing part 1)")
+        .trim();
+    let _p2_prf_enc = parts.next()
+        .expect("Malformed encryption (missing part 2)")
+        .trim();
     let p2_enc_id = Ciphertext::try_from(ct_str)?;
-    let p2_prf_enc = Scalar::try_from_base64(scalar_str)?;
+
+    // TODO: Check proof of encryption
 
     let mut input = String::new();
-    println!("Enter Paper 1 data:");
+    println!("Paper 1, encryption 1:");
     stdin.read_line(&mut input)?;
-
     let mut parts = input.trim().split('-');
-    let enc_a = parts.next().unwrap().trim();
-    let enc_b = parts.next().unwrap().trim();
-    let enc_r_a = parts.next().unwrap().trim();
-    let enc_r_b = parts.next().unwrap().trim();
-    let prf_a = parts.next().unwrap().trim();
-    let prf_b = parts.next().unwrap().trim();
-    let prf_r_a = parts.next().unwrap().trim();
-    let prf_r_b = parts.next().unwrap().trim();
+    let enc_a = parts.next()
+        .expect("Malformed encryption (missing part 1)")
+        .trim();
+    let enc_b = parts.next()
+        .expect("Malformed encryption (missing part 2)")
+        .trim();
 
-    let enc_a = Ciphertext::try_from(enc_a)?;
-    let enc_b = Ciphertext::try_from(enc_b)?;
-    let enc_r_a = Ciphertext::try_from(enc_r_a)?;
-    let enc_r_b = Ciphertext::try_from(enc_r_b)?;
-    println!("Ciphertexts decoded");
+    let mut input = String::new();
+    println!("Paper 1, encryption 2:");
+    stdin.read_line(&mut input)?;
+    let mut parts = input.trim().split('-');
+    let enc_r_a = parts.next()
+        .expect("Malformed encryption (missing part 1)")
+        .trim();
+    let enc_r_b = parts.next()
+        .expect("Malformed encryption (missing part 2)")
+        .trim();
 
-    let prf_a = PrfKnowPlaintext::try_from(prf_a)?;
-    let prf_b = PrfKnowPlaintext::try_from(prf_b)?;
-    let prf_r_a = PrfKnowPlaintext::try_from(prf_r_a)?;
-    let prf_r_b = PrfKnowPlaintext::try_from(prf_r_b)?;
+    let mut input = String::new();
+    println!("Paper 1, proof 1:");
+    stdin.read_line(&mut input)?;
+    let mut parts = input.trim().split('_');
+    let prf_a = parts.next()
+        .expect("Malformed proof (missing part 1)")
+        .trim();
+    let prf_b = parts.next()
+        .expect("Malformed proof (missing part 2)")
+        .trim();
+
+    let mut input = String::new();
+    println!("Paper 1, proof 2:");
+    stdin.read_line(&mut input)?;
+    let mut parts = input.trim().split('_');
+    let prf_r_a = parts.next()
+        .expect("Malformed proof (missing part 1)")
+        .trim();
+    let prf_r_b = parts.next()
+        .expect("Malformed proof (missing part 1)")
+        .trim();
+
+    let enc_a = Ciphertext::try_from(enc_a)
+        .expect("Malformed encryption (encryption 1, part 1)");
+    let enc_b = Ciphertext::try_from(enc_b)
+        .expect("Malformed encryption (encryption 1, part 2)");
+    let enc_r_a = Ciphertext::try_from(enc_r_a)
+        .expect("Malformed encryption (encryption 2, part 1)");
+    let enc_r_b = Ciphertext::try_from(enc_r_b)
+        .expect("Malformed encryption (encryption 2, part 2)");
+
+    println!("Ciphertexts decoded.");
+
+    let prf_a = PrfKnowPlaintext::try_from(prf_a)
+        .expect("Malformed proof (proof 1, part 1)");
+    let prf_b = PrfKnowPlaintext::try_from(prf_b)
+        .expect("Malformed proof (proof 1, part 2)");
+    let prf_r_a = PrfKnowPlaintext::try_from(prf_r_a)
+        .expect("Malformed proof (proof 2, part 1)");
+    let prf_r_b = PrfKnowPlaintext::try_from(prf_r_b)
+        .expect("Malformed proof (proof 2, part 1)");
+
+    println!("Proofs decoded.");
 
     if prf_a.verify() && prf_b.verify() && prf_r_a.verify() && prf_r_b.verify() {
-        println!("proofs valid");
+        println!("Proofs valid.");
     } else {
         println!("Proofs invalid, rejecting ballot.");
     }
@@ -70,9 +110,7 @@ pub async fn run_receive(address: &str) -> Result<()> {
         p1_prf_b: prf_b,
         p1_prf_r_a: prf_r_a,
         p1_prf_r_b: prf_r_b,
-        p2_id: voter_id,
         p2_enc_id,
-        p2_prf_enc,
     };
 
     let msg = VoterMessage::Ballot(ballot);

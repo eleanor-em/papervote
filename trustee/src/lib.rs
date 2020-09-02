@@ -139,7 +139,7 @@ struct GeneratedData {
 pub struct Trustee {
     info: InternalInfo,
     trustee_info: HashMap<Uuid, TrusteeInfo>,
-    failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
+    failed_voter_ids: Arc<Mutex<Vec<Ciphertext>>>,
     received_votes: Arc<Mutex<Vec<SignedMessage>>>,
     downloaded_votes: Option<Vec<Vec<Ciphertext>>>,
     party: ThresholdParty,
@@ -385,7 +385,7 @@ impl Trustee {
     }
 
     async fn receive_voter_data_task(info: InternalInfo,
-                                     failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
+                                     failed_voter_ids: Arc<Mutex<Vec<Ciphertext>>>,
                                      received_votes: Arc<Mutex<Vec<SignedMessage>>>,
                                      candidates: Arc<HashMap<u64, Candidate>>) -> Result<(), TrusteeError> {
         let mut listener = TcpListener::bind(&info.address).await?;
@@ -401,7 +401,7 @@ impl Trustee {
 
     async fn receive_voter_data_inner(mut stream: TcpStream,
                                       info: InternalInfo,
-                                      failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
+                                      failed_voter_ids: Arc<Mutex<Vec<Ciphertext>>>,
                                       received_votes: Arc<Mutex<Vec<SignedMessage>>>,
                                       candidates: Arc<HashMap<u64, Candidate>>) -> Result<(), TrusteeError> {
         // Read entire stream
@@ -478,7 +478,7 @@ impl Trustee {
     }
 
     async fn handle_ballot(info: InternalInfo,
-                           failed_voter_ids: Arc<Mutex<Vec<VoterId>>>,
+                           failed_voter_ids: Arc<Mutex<Vec<Ciphertext>>>,
                            received_votes: Arc<Mutex<Vec<SignedMessage>>>,
                            candidates: Arc<HashMap<u64, Candidate>>,
                            ballot: Ballot) -> Result<(), TrusteeError> {
@@ -503,13 +503,7 @@ impl Trustee {
         }
         if failed {
             let mut vids = failed_voter_ids.lock().unwrap();
-            vids.push(ballot.p2_id);
-            return Ok(());
-        }
-
-        let encoded_voter_id = ballot.p2_id.try_as_curve_elem().ok_or(TrusteeError::Decode)?;
-        if info.pubkey.encrypt(&info.ctx, &encoded_voter_id, &ballot.p2_prf_enc) != ballot.p2_enc_id {
-            eprintln!("#{}: failed to verify proof-of-encryption for voter ID", info.index);
+            vids.push(ballot.p2_enc_id);
             return Ok(());
         }
 

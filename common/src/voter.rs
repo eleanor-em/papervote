@@ -310,9 +310,7 @@ pub struct Ballot {
     pub p1_prf_b: PrfKnowPlaintext,
     pub p1_prf_r_a: PrfKnowPlaintext,
     pub p1_prf_r_b: PrfKnowPlaintext,
-    pub p2_id: VoterId,
     pub p2_enc_id: Ciphertext,
-    pub p2_prf_enc: Scalar,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]

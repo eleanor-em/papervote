@@ -539,6 +539,11 @@ pub async fn get_pet_commits(trustee_info: &HashMap<Uuid, TrusteeInfo>,
 
     let mut result = HashMap::new();
 
+    // Check for empty commitments
+    if commits.len() == 0 {
+        return Ok(result);
+    }
+
     // Check signatures
     for trustee in trustee_info.keys() {
         let pubkey = &trustee_info[trustee].pubkey;
