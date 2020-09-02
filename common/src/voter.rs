@@ -228,15 +228,11 @@ impl Vote {
     }
 
     pub fn pretty(&self) -> String {
-        let mut reversed = self.preferences.iter().collect_vec();
-        reversed.sort_by_key(|(_, key)| **key);
-        let reversed = reversed.into_iter()
-            .map(|(candidate, key)| (key + 1, candidate))
-            .collect_vec();
-
         let mut result = String::new();
-        for (preference, candidate) in reversed.into_iter() {
-            result += &format!("\t{}. {}\n", preference, candidate.name());
+        let mut selections = self.preferences.iter().collect_vec();
+        selections.sort_by_key(|(candidate, _)| candidate.id);
+        for (candidate, preference) in selections {
+            result += &format!("\t{}: {}\n", candidate.name(), preference + 1);
         }
 
         result

@@ -13,7 +13,7 @@ use common::voter::{Vote, Candidate, Ballot};
 use tokio::time;
 use tokio::time::Duration;
 use std::io::{Write, BufWriter};
-use qrcode::QrCode;
+use qrcode::{QrCode, EcLevel};
 use printpdf::{PdfDocument, Mm, Image};
 use std::fs::File;
 use std::collections::{HashSet, HashMap};
@@ -54,8 +54,10 @@ async fn main() -> Result<()> {
     let pubkey = pubkey.unwrap();
     println!("Public key: {}", pubkey.as_base64());
 
-    // Create an ID
-    let id = base64::encode(Uuid::new_v4().as_bytes()).replace("/", "-");
+    // Create an ID; just use random bytes for the prototype
+    let mut id = Uuid::new_v4().to_string()
+        .replace("-", "");
+    id.truncate(10);
     let mut voter = Voter::new(cfg.session_id.clone(), pubkey, ctx.clone(), commit_ctx, id)?;
 
     // Get preferences
@@ -85,10 +87,12 @@ async fn main() -> Result<()> {
         time::delay_for(Duration::from_millis(DELAY)).await;
     }
 
-    // for debugging
-    while let Err(_) = voter.post_vote(&trustees[0].address).await{
-        println!("{}: retrying vote", voter.id());
-        time::delay_for(Duration::from_millis(DELAY)).await;
+    // for debugging and testing; submit the vote over the wire
+    if cfg.debug_mode {
+        while let Err(_) = voter.post_vote(&trustees[0].address).await {
+            println!("{}: retrying vote", voter.id());
+            time::delay_for(Duration::from_millis(DELAY)).await;
+        }
     }
 
     // Produce ballot information
@@ -98,7 +102,7 @@ async fn main() -> Result<()> {
     println!("Your vote (Paper 1):");
     println!("{}", vote_str);
     println!("Your identification (save this for verification later) (Paper 2):");
-    println!("\tID:        {}", ballot.p2_id);
+    println!("\tID: {}", ballot.p2_id);
     save_ballots(ballot, vote_str)?;
 
     Ok(())
@@ -231,24 +235,35 @@ fn get_vote(candidates: HashMap<u64, Candidate>) -> Result<Vote> {
 }
 
 fn save_ballots(ballot: Ballot, vote_str: String) -> Result<()> {
+    let ec_level = EcLevel::Q;
+    
     let mut data = Vec::new();
     data.extend(ballot.p1_enc_a.to_string().as_bytes());
     data.push(b'-');
     data.extend(ballot.p1_enc_b.to_string().as_bytes());
-    data.push(b'-');
+    let image = QrCode::with_error_correction_level(&data, ec_level)?.render::<image::Luma<u8>>().build();
+    image.save("paper1-enc1-img.bmp")?;
+
+    let mut data = Vec::new();
     data.extend(ballot.p1_enc_r_a.to_string().as_bytes());
     data.push(b'-');
     data.extend(ballot.p1_enc_r_b.to_string().as_bytes());
-    data.push(b'-');
+    let image = QrCode::with_error_correction_level(&data, ec_level)?.render::<image::Luma<u8>>().build();
+    image.save("paper1-enc2-img.bmp")?;
+
+    let mut data = Vec::new();
     data.extend(ballot.p1_prf_a.to_string().as_bytes());
-    data.push(b'-');
+    data.push(b'_');
     data.extend(ballot.p1_prf_b.to_string().as_bytes());
-    data.push(b'-');
+    let image = QrCode::with_error_correction_level(&data, ec_level)?.render::<image::Luma<u8>>().build();
+    image.save("paper1-prf1-img.bmp")?;
+
+    let mut data = Vec::new();
     data.extend(ballot.p1_prf_r_a.to_string().as_bytes());
-    data.push(b'-');
+    data.push(b'_');
     data.extend(ballot.p1_prf_r_b.to_string().as_bytes());
-    let image = QrCode::new(&data)?.render::<image::Luma<u8>>().build();
-    image.save("paper1-img.bmp")?;
+    let image = QrCode::with_error_correction_level(&data, ec_level)?.render::<image::Luma<u8>>().build();
+    image.save("paper1-prf2-img.bmp")?;
 
     let mut data = Vec::new();
     data.extend(ballot.p2_enc_id.to_string().as_bytes());
@@ -263,12 +278,26 @@ fn save_ballots(ballot: Ballot, vote_str: String) -> Result<()> {
     let current_layer = doc.get_page(page1).get_layer(layer1);
 
     let font = doc.add_builtin_font(printpdf::BuiltinFont::Courier)?;
-    let vote_str = vote_str.replace("\n", " ");
-    current_layer.use_text(&format!("Paper 1: {}", vote_str), 14, Mm(25.0), Mm(270.0), &font);
+    let vote_str = vote_str.replace("\n", "  ");
+    current_layer.use_text(&format!("Paper 1 -- Vote: {}", vote_str), 14, Mm(25.0), Mm(270.0), &font);
 
-    let mut image_file = File::open("paper1-img.bmp")?;
+    current_layer.use_text("Encryptions:", 12, Mm(25.0), Mm(260.0), &font);
+    current_layer.use_text("Proofs:", 12, Mm(25.0), Mm(190.0), &font);
+
+    let mut image_file = File::open("paper1-enc1-img.bmp")?;
     let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;
-    image.add_to_layer(current_layer.clone(), Some(Mm(25.0)), Some(Mm(150.0)), None, None, None, None);
+    image.add_to_layer(current_layer.clone(), Some(Mm(25.0)), Some(Mm(200.0)), None, None, None, None);
+    let mut image_file = File::open("paper1-enc2-img.bmp")?;
+    let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;
+    image.add_to_layer(current_layer.clone(), Some(Mm(110.0)), Some(Mm(200.0)), None, None, None, None);
+
+
+    let mut image_file = File::open("paper1-prf1-img.bmp")?;
+    let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;
+    image.add_to_layer(current_layer.clone(), Some(Mm(25.0)), Some(Mm(105.0)), None, None, None, None);
+    let mut image_file = File::open("paper1-prf2-img.bmp")?;
+    let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;
+    image.add_to_layer(current_layer.clone(), Some(Mm(110.0)), Some(Mm(105.0)), None, None, None, None);
 
     doc.save(&mut BufWriter::new(File::create("paper1.pdf")?))?;
 
@@ -276,7 +305,7 @@ fn save_ballots(ballot: Ballot, vote_str: String) -> Result<()> {
     let current_layer = doc.get_page(page1).get_layer(layer1);
 
     let font = doc.add_builtin_font(printpdf::BuiltinFont::Courier)?;
-    current_layer.use_text(&format!("Paper 2: {}", ballot.p2_id.to_string()), 14, Mm(25.0), Mm(270.0), &font);
+    current_layer.use_text(&format!("Paper 2 -- VoterID: {}", ballot.p2_id.to_string()), 14, Mm(25.0), Mm(270.0), &font);
 
     let mut image_file = File::open("paper2-img.bmp")?;
     let image = Image::try_from(image::bmp::BmpDecoder::new(&mut image_file)?)?;
@@ -284,7 +313,10 @@ fn save_ballots(ballot: Ballot, vote_str: String) -> Result<()> {
 
     doc.save(&mut BufWriter::new(File::create("paper2.pdf")?))?;
 
-    std::fs::remove_file("paper1-img.bmp")?;
+    std::fs::remove_file("paper1-enc1-img.bmp")?;
+    std::fs::remove_file("paper1-enc2-img.bmp")?;
+    std::fs::remove_file("paper1-prf1-img.bmp")?;
+    std::fs::remove_file("paper1-prf2-img.bmp")?;
     std::fs::remove_file("paper2-img.bmp")?;
 
     println!("Files to print saved to `paper1.pdf` and `paper2.pdf`.");

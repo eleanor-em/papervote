@@ -10,8 +10,7 @@ use common::APP_NAME;
 use tokio::time::Duration;
 use tokio::time;
 use std::sync::Arc;
-use common::voter::{Vote, Candidate};
-use std::collections::HashMap;
+use common::voter::Vote;
 
 fn with_newline(msg: ControlMessage) -> Vec<u8> {
     format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes().to_vec()
@@ -36,7 +35,7 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>, from_file: Option<&s
     }
 
     let mut trustee = match from_file {
-        None => run_leader_gen(&cfg, &ctx, candidates.clone(), &mut streams, index).await?,
+        None => run_leader_gen(&cfg, &ctx, &mut streams, index).await?,
         Some(file) => run_leader_existing(&cfg, &ctx, &mut streams, index, file).await?,
     };
 
@@ -139,14 +138,14 @@ pub async fn run_leader(index: usize, addresses: Vec<&str>, from_file: Option<&s
     Ok(())
 }
 
-pub async fn run_leader_gen(cfg: &PapervoteConfig, ctx: &CryptoContext, candidates: Arc<HashMap<u64, Candidate>>, mut streams: &mut [TcpStream], index: usize) -> Result<Trustee> {
+pub async fn run_leader_gen(cfg: &PapervoteConfig, ctx: &CryptoContext, mut streams: &mut [TcpStream], index: usize) -> Result<Trustee> {
     open_session(&cfg, cfg.session_id.clone()).await?;
 
     // Create trustee
     for stream in streams.iter_mut() {
         stream.write_all(&with_newline(ControlMessage::Begin)).await?;
     }
-    let mut trustee = Trustee::new(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
+    let trustee = Trustee::new(cfg.api_url.clone(), cfg.trustee_advertised_url.clone(),
                                    cfg.session_id, ctx.clone(), index, cfg.min_trustees, cfg.trustee_count).await?;
     wait_for_ok(&mut streams).await?;
 
