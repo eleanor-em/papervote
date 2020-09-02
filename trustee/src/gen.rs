@@ -2,7 +2,7 @@ use uuid::Uuid;
 use common::sign::{SigningKeypair, SignedMessage};
 use common::net::{TrusteeInfo, TrusteeMessage, WrappedResponse, Response};
 use std::collections::HashMap;
-use cryptid::threshold::{ThresholdGenerator, KeygenCommitment, Threshold};
+use cryptid::threshold::{ThresholdGenerator, KeygenCommitment, Threshold, PubkeyProof};
 use cryptid::{Hasher, CryptoError, Scalar};
 use cryptid::elgamal::CryptoContext;
 use crate::TrusteeError;
@@ -85,6 +85,7 @@ impl GeneratingTrustee {
         index: usize,
         k: usize,
         n: usize,
+        pubkey_proof: PubkeyProof,
         seed: &[u8],
         id: Uuid,
     ) -> Result<GeneratingTrustee, CryptoError> {
@@ -99,7 +100,7 @@ impl GeneratingTrustee {
         let my_info = TrusteeInfo {
             id,
             pubkey: signing_keypair.public_key().into(),
-            pubkey_proof: None,
+            pubkey_proof: Some(pubkey_proof),
             index,
             address: format!("{}:{}", advertised_addr, port),
         };
@@ -225,8 +226,13 @@ impl GeneratingTrustee {
         }
     }
 
-    pub(crate) async fn get_registrations(&mut self, my_registration: &SignedMessage, client: &Client) -> Result<(), TrusteeError> {
+    pub(crate) async fn get_registrations(&mut self, my_info: &SignedMessage, client: &Client) -> Result<(), TrusteeError> {
         loop {
+            let my_info = match &my_info.inner {
+                TrusteeMessage::Info { info } => Ok(info),
+                _ => Err(TrusteeError::InvalidState)
+            }?;
+
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
             let res: WrappedResponse = client.get(&format!("{}/{}/trustee/all", &self.api_base_addr, &self.session_id))
@@ -236,8 +242,15 @@ impl GeneratingTrustee {
             // Check signatures
             if let Response::ResultSet(results) = res.msg {
                 // Make sure our message is in there
-                if !results.contains(my_registration) {
-                    return Err(TrusteeError::MissingCommitment)?;
+                if !results.iter().any(|msg| {
+                    match &msg.inner {
+                        TrusteeMessage::Info { info } => {
+                            info.pubkey == my_info.pubkey && info.id == my_info.id
+                        },
+                        _ => false,
+                    }
+                }) {
+                    return Err(TrusteeError::MissingRegistration)?;
                 }
 
                 for result in results {
@@ -270,7 +283,7 @@ impl GeneratingTrustee {
                 if self.verify_all(&results)? {
                     // Make sure our message is in there
                     if !results.contains(my_commit) {
-                        return Err(TrusteeError::MissingCommitment)?;
+                        return Err(TrusteeError::MissingKeygenCommitment)?;
                     }
 
                     for result in results {
@@ -293,6 +306,10 @@ impl GeneratingTrustee {
 
     pub(crate) async fn get_signatures(&mut self, my_sig: &SignedMessage, client: &Client) -> Result<(), TrusteeError> {
         loop {
+            let (my_pubkey, my_pubkey_proof) = match &my_sig.inner {
+                TrusteeMessage::KeygenSign { pubkey, pubkey_proof } => Ok((pubkey, pubkey_proof)),
+                _ => Err(TrusteeError::InvalidState)
+            }?;
             // Wait a moment for other registrations
             time::delay_for(Duration::from_millis(200)).await;
             let res: WrappedResponse = client.get(&format!("{}/{}/keygen/sign/all", &self.api_base_addr, &self.session_id))
@@ -303,8 +320,19 @@ impl GeneratingTrustee {
             if let Response::ResultSet(results) = res.msg {
                 if self.verify_all(&results)? {
                     // Make sure our message is in there
-                    if !results.contains(my_sig) {
-                        return Err(TrusteeError::MissingSignature)?;
+                    // if !results.contains(my_sig) {
+                    //     return Err(TrusteeError::MissingSignature)?;
+                    // }
+                    // Make sure our message is in there
+                    if !results.iter().any(|msg| {
+                        match &msg.inner {
+                            TrusteeMessage::KeygenSign { pubkey, pubkey_proof } => {
+                                pubkey == my_pubkey && pubkey_proof == my_pubkey_proof
+                            },
+                            _ => false,
+                        }
+                    }) {
+                        return Err(TrusteeError::MissingRegistration)?;
                     }
 
                     for result in results {

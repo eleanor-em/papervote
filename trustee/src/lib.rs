@@ -67,7 +67,8 @@ pub enum TrusteeError {
     InvalidOpening,
     InvalidProof,
     MissingRegistration,
-    MissingCommitment,
+    MissingKeygenCommitment,
+    MissingPetCommitment,
     MissingSignature,
     InvalidState,
 }
@@ -284,10 +285,12 @@ impl Trustee {
             index,
             min_trustees,
             trustee_count,
+            gen.pubkey_proof.clone(),
             &base64::decode(gen.signing_seed).map_err(|_| TrusteeError::Decode)?,
             gen.id,
         )?;
 
+        // Fetch data from WBB
         let client = reqwest::Client::new();
         let msg = trustee.gen_registration();
         trustee.get_registrations(&msg, &client).await?;
@@ -295,6 +298,12 @@ impl Trustee {
         let party = ThresholdParty::from_existing(
             &ctx, index, min_trustees, trustee_count, gen.secret_share, gen.pubkey_proof, gen.pubkey
         );
+
+        let msg = trustee.sign(TrusteeMessage::KeygenSign {
+            pubkey: party.pubkey(),
+            pubkey_proof: party.pubkey_proof(),
+        });
+        trustee.get_signatures(&msg, &client).await?;
 
         let info = InternalInfo {
             api_base_addr,
@@ -911,7 +920,7 @@ impl Trustee {
 
             for (voter_id, opening) in these_openings {
                 let (vote_commit, mac_commit) = these_commits.remove(&voter_id)
-                    .ok_or(TrusteeError::MissingCommitment)?;
+                    .ok_or(TrusteeError::MissingPetCommitment)?;
                 if let Some((vote_ct, mac_ct)) = data.get(&voter_id) {
                     // Check the commitment openings
                     if !vote_commit.validate(
