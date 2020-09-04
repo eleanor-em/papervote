@@ -73,6 +73,16 @@ pub enum TrusteeError {
     InvalidState,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PetInstance {
+    pub voter_id: VoterId,
+    pub enc_mac: Ciphertext,
+    pub enc_vote: Ciphertext,
+    pub enc_received_vote: Ciphertext,
+    pub a: CurveElem,
+    pub b: CurveElem,
+}
+
 impl Display for TrusteeError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
@@ -104,16 +114,6 @@ impl From<reqwest::Error> for TrusteeError {
 }
 
 impl Error for TrusteeError {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PetInstance {
-    voter_id: VoterId,
-    enc_mac: Ciphertext,
-    enc_vote: Ciphertext,
-    enc_received_vote: Ciphertext,
-    a: CurveElem,
-    b: CurveElem,
-}
 
 pub struct PetData {
     voter_id: VoterId,

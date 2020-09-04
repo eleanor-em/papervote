@@ -3019,6 +3019,7 @@ dependencies = [
  "cryptid",
  "eyre",
  "itertools",
+ "rayon",
  "reqwest",
  "serde",
  "serde_json",
