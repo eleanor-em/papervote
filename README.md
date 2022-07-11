@@ -1,6 +1,8 @@
 # Verifiable Remote Paper Voting
 An implementation of a verifiable remote-voting protocol with paper assurance. Protocol by Xavier Boyen, Kristian Gjøsteen, Thomas Haines, Eleanor McMurtry, and Vanessa Teague.
 
+## This code is for academic purposes ONLY. DO NOT USE IT IN PRACTICE.
+
 To build and run, there is a makefile `make` (or run `cargo build --release --all --all-targets`).
 
 k-out-of-n threshold ElGamal encryption is done with [Cryptid](https://github.com/eleanor-em/cryptid) using Pedersen secret sharing and Curve25519 ([Ristretto](https://ristretto.group/) subgroup).
